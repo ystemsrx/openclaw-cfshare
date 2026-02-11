@@ -103,7 +103,6 @@ type ExposureGetField =
   | "expires_at"
   | "local_url"
   | "stats"
-  | "usage_snippets"
   | "file_sharing"
   | "last_error"
   | "manifest"
@@ -829,6 +828,24 @@ export class CfshareManager {
     };
   }
 
+  private makeResponsePublicUrl(session: ExposureSession): string | undefined {
+    const base = session.publicUrl;
+    if (!base) {
+      return undefined;
+    }
+    if (session.access.mode !== "token" || !session.access.token) {
+      return base;
+    }
+    try {
+      const out = new URL(base);
+      out.searchParams.set("token", session.access.token);
+      return out.toString();
+    } catch {
+      const sep = base.includes("?") ? "&" : "?";
+      return `${base}${sep}token=${encodeURIComponent(session.access.token)}`;
+    }
+  }
+
   private buildRateLimiter(policy: RateLimitPolicy): (ip: string) => boolean {
     if (!policy.enabled) {
       return () => true;
@@ -1148,32 +1165,32 @@ export class CfshareManager {
   }): Promise<FileServerHandle> {
     const port = await findFreePort();
 
-    const files = await walkFiles(params.workspaceDir);
     const manifest: ManifestEntry[] = [];
-    for (const relPath of files) {
-      if (relPath === "_cfshare_bundle.zip") {
-        continue;
-      }
-      const abs = path.join(params.workspaceDir, relPath);
-      const stat = await fs.stat(abs);
-      const detectedMime = String(mimeLookup(abs) || "application/octet-stream");
-      const capabilities = await detectFileDeliveryCapabilities({
-        filePath: abs,
-        mime: detectedMime,
-      });
-      manifest.push({
-        name: relPath,
-        size: stat.size,
-        sha256: await sha256File(abs),
-        relative_url: `/${formatRelativeUrl(relPath)}`,
-        modified_at: toLocalIso(stat.mtime),
-        is_binary: capabilities.isBinary,
-        preview_supported: capabilities.previewSupported,
-      });
-    }
-
     let zipBundle: { zipPath: string; size: number } | undefined;
-    if (params.mode === "zip") {
+    if (params.mode === "normal") {
+      const files = await walkFiles(params.workspaceDir);
+      for (const relPath of files) {
+        if (relPath === "_cfshare_bundle.zip") {
+          continue;
+        }
+        const abs = path.join(params.workspaceDir, relPath);
+        const stat = await fs.stat(abs);
+        const detectedMime = String(mimeLookup(abs) || "application/octet-stream");
+        const capabilities = await detectFileDeliveryCapabilities({
+          filePath: abs,
+          mime: detectedMime,
+        });
+        manifest.push({
+          name: relPath,
+          size: stat.size,
+          sha256: await sha256File(abs),
+          relative_url: `/${formatRelativeUrl(relPath)}`,
+          modified_at: toLocalIso(stat.mtime),
+          is_binary: capabilities.isBinary,
+          preview_supported: capabilities.previewSupported,
+        });
+      }
+    } else {
       zipBundle = await this.createZipArchive(params.workspaceDir);
       manifest.push({
         name: "download.zip",
@@ -1256,7 +1273,7 @@ export class CfshareManager {
           return;
         }
 
-        if (pathname === "/__cfshare__/download-folder.zip") {
+        if (pathname === "/__cfshare__/download-folder.zip" && params.mode === "normal") {
           const folderPath = normalizeWorkspaceRelativePath(ensureString(url.searchParams.get("path")));
           if (!folderPath) {
             res.writeHead(400, { "content-type": "application/json" });
@@ -1303,6 +1320,12 @@ export class CfshareManager {
             countAsDownload: true,
           });
           await checkMaxDownloads();
+          return;
+        }
+
+        if (params.mode === "zip") {
+          res.writeHead(404, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "not_found" }));
           return;
         }
 
@@ -1421,7 +1444,7 @@ export class CfshareManager {
       id: session.id,
       type: session.type,
       status: session.status,
-      public_url: session.publicUrl,
+      public_url: this.makeResponsePublicUrl(session),
       local_url: session.localUrl,
       expires_at: session.expiresAt,
     };
@@ -1850,7 +1873,7 @@ export class CfshareManager {
 
       return {
         id: session.id,
-        public_url: session.publicUrl,
+        public_url: this.makeResponsePublicUrl(session),
         local_url: session.localUrl,
         expires_at: session.expiresAt,
         access_info: {
@@ -1936,7 +1959,7 @@ export class CfshareManager {
         maxDownloads: session.maxDownloads,
         directSingleFileRoot: mode === "normal" && rootBehavior.directSingleFileRoot,
         autoEnterSingleDirectory: mode === "normal" && rootBehavior.autoEnterSingleDirectory,
-        rootDirectories: rootBehavior.rootDirectories,
+        rootDirectories: mode === "normal" ? rootBehavior.rootDirectories : [],
       });
 
       session.originServer = fileServer.server;
@@ -1997,15 +2020,21 @@ export class CfshareManager {
         },
       });
 
-      const responseManifest = this.buildExposeFilesResponseManifest({
-        inputs: inputSummary,
-        fullManifest: session.manifest ?? [],
-        detailedLimit: MAX_RESPONSE_MANIFEST_ITEMS,
-      });
+      const responseManifest =
+        mode === "zip"
+          ? {
+              ...this.makeManifestResponse(session.manifest, MAX_RESPONSE_MANIFEST_ITEMS),
+              manifest_mode: "detailed" as const,
+            }
+          : this.buildExposeFilesResponseManifest({
+              inputs: inputSummary,
+              fullManifest: session.manifest ?? [],
+              detailedLimit: MAX_RESPONSE_MANIFEST_ITEMS,
+            });
 
       return {
         id: session.id,
-        public_url: session.publicUrl,
+        public_url: this.makeResponsePublicUrl(session),
         expires_at: session.expiresAt,
         mode,
         presentation,
@@ -2101,32 +2130,6 @@ export class CfshareManager {
     return { selectorUsed: false, selectedIds: [], missingIds: [] };
   }
 
-  private makeUsageSnippets(session: ExposureSession): Record<string, string> {
-    const usageSnippets: Record<string, string> = {};
-    if (!session.publicUrl) {
-      return usageSnippets;
-    }
-
-    if (session.access.mode === "token" && session.access.token) {
-      usageSnippets.curl = `curl -L '${session.publicUrl}?token=${session.access.token}'`;
-      usageSnippets.wget = `wget -O - '${session.publicUrl}?token=${session.access.token}'`;
-      usageSnippets.powershell = `iwr '${session.publicUrl}?token=${session.access.token}'`;
-      return usageSnippets;
-    }
-
-    if (session.access.mode === "basic" && session.access.username && session.access.password) {
-      usageSnippets.curl = `curl -u '${session.access.username}:${session.access.password}' -L '${session.publicUrl}'`;
-      usageSnippets.wget = `wget --user='${session.access.username}' --password='${session.access.password}' -O - '${session.publicUrl}'`;
-      usageSnippets.powershell = `$p='${session.access.password}';$u='${session.access.username}';iwr '${session.publicUrl}' -Authentication Basic -Credential (New-Object System.Management.Automation.PSCredential($u,(ConvertTo-SecureString $p -AsPlainText -Force)))`;
-      return usageSnippets;
-    }
-
-    usageSnippets.curl = `curl -L '${session.publicUrl}'`;
-    usageSnippets.wget = `wget -O - '${session.publicUrl}'`;
-    usageSnippets.powershell = `iwr '${session.publicUrl}'`;
-    return usageSnippets;
-  }
-
   private async buildExposureDetail(
     session: ExposureSession,
     opts?: {
@@ -2196,11 +2199,10 @@ export class CfshareManager {
         origin_port: session.originPort,
         tunnel_port: session.tunnelPort,
       },
-      public_url: session.publicUrl,
+      public_url: this.makeResponsePublicUrl(session),
       expires_at: session.expiresAt,
       local_url: session.localUrl,
       stats: session.stats,
-      usage_snippets: this.makeUsageSnippets(session),
       file_sharing: fileSharing,
       last_error: session.lastError,
     };

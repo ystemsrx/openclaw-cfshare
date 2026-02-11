@@ -104,7 +104,6 @@ function registerToolsForContext(api: OpenClawPluginApi, ctx: ToolContext) {
             | "expires_at"
             | "local_url"
             | "stats"
-            | "usage_snippets"
             | "file_sharing"
             | "last_error"
             | "manifest"

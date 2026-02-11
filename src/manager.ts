@@ -106,7 +106,33 @@ type ExposureLogsOpts = {
 };
 
 function nowIso(): string {
-  return new Date().toISOString();
+  return toLocalIso(new Date());
+}
+
+function toLocalIso(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+  const millis = String(date.getMilliseconds()).padStart(3, "0");
+
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absOffsetMinutes = Math.abs(offsetMinutes);
+  const offsetHours = String(Math.trunc(absOffsetMinutes / 60)).padStart(2, "0");
+  const offsetMins = String(absOffsetMinutes % 60).padStart(2, "0");
+
+  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${millis}${sign}${offsetHours}:${offsetMins}`;
+}
+
+function timestampMs(input: string | undefined): number | undefined {
+  if (!input) {
+    return undefined;
+  }
+  const ms = Date.parse(input);
+  return Number.isFinite(ms) ? ms : undefined;
 }
 
 function randomId(prefix: string): string {
@@ -433,6 +459,10 @@ function matchAuditFilters(
     to_ts?: string;
   },
 ): boolean {
+  const fromMs = timestampMs(filters.from_ts);
+  const toMs = timestampMs(filters.to_ts);
+  const eventMs = timestampMs(event.ts);
+
   if (filters.id && event.id !== filters.id) {
     return false;
   }
@@ -442,11 +472,23 @@ function matchAuditFilters(
   if (filters.type && event.type !== filters.type) {
     return false;
   }
-  if (filters.from_ts && event.ts < filters.from_ts) {
-    return false;
+  if (filters.from_ts) {
+    if (fromMs !== undefined && eventMs !== undefined) {
+      if (eventMs < fromMs) {
+        return false;
+      }
+    } else if (event.ts < filters.from_ts) {
+      return false;
+    }
   }
-  if (filters.to_ts && event.ts > filters.to_ts) {
-    return false;
+  if (filters.to_ts) {
+    if (toMs !== undefined && eventMs !== undefined) {
+      if (eventMs > toMs) {
+        return false;
+      }
+    } else if (event.ts > filters.to_ts) {
+      return false;
+    }
   }
   return true;
 }
@@ -1258,7 +1300,7 @@ export class CfshareManager {
     }
 
     const ttlSeconds = normalizeTtl(params.opts?.ttl_seconds, this.policy);
-    const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    const expiresAt = toLocalIso(new Date(Date.now() + ttlSeconds * 1000));
     const accessMode = normalizeAccessMode(params.opts?.access, this.policy.defaultExposePortAccess);
     const protectOrigin =
       typeof params.opts?.protect_origin === "boolean" ? params.opts.protect_origin : accessMode !== "none";
@@ -1372,7 +1414,7 @@ export class CfshareManager {
     }
 
     const ttlSeconds = normalizeTtl(params.opts?.ttl_seconds, this.policy);
-    const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    const expiresAt = toLocalIso(new Date(Date.now() + ttlSeconds * 1000));
     const mode = params.opts?.mode ?? "normal";
     const presentation = normalizeFilePresentation(params.opts?.presentation);
     const accessMode = normalizeAccessMode(params.opts?.access, this.policy.defaultExposeFilesAccess);

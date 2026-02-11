@@ -1143,6 +1143,8 @@ export class CfshareManager {
     presentation: FilePresentationMode;
     maxDownloads?: number;
     directSingleFileRoot: boolean;
+    autoEnterSingleDirectory: boolean;
+    rootDirectories: string[];
   }): Promise<FileServerHandle> {
     const port = await findFreePort();
 
@@ -1234,6 +1236,8 @@ export class CfshareManager {
               mode: params.mode,
               presentation: params.presentation,
               manifest: explorerManifest,
+              autoEnterSingleDirectory: params.autoEnterSingleDirectory,
+              rootDirectories: params.rootDirectories,
             }),
             "utf8",
           );
@@ -1344,6 +1348,28 @@ export class CfshareManager {
 
     this.appendLog(params.session, "origin", `file server listening on 127.0.0.1:${port}`);
     return { server, port, manifest };
+  }
+
+  private async detectWorkspaceRootBehavior(workspaceDir: string): Promise<{
+    directSingleFileRoot: boolean;
+    autoEnterSingleDirectory: boolean;
+    rootDirectories: string[];
+  }> {
+    const entries = await fs.readdir(workspaceDir, { withFileTypes: true });
+    const rootDirectories = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+    if (entries.length !== 1) {
+      return {
+        directSingleFileRoot: false,
+        autoEnterSingleDirectory: false,
+        rootDirectories,
+      };
+    }
+    const rootEntry = entries[0];
+    return {
+      directSingleFileRoot: rootEntry.isFile(),
+      autoEnterSingleDirectory: rootEntry.isDirectory(),
+      rootDirectories,
+    };
   }
 
   private async copyInputsToWorkspace(
@@ -1874,8 +1900,6 @@ export class CfshareManager {
     const workspaceDir = path.join(this.workspaceRoot, id);
     await mkdirp(workspaceDir);
     const inputSummary = await this.summarizeExposeInputs(params.paths);
-    const directSingleFileRoot =
-      mode === "normal" && inputSummary.length === 1 && inputSummary[0]?.type === "file";
 
     const session: ExposureSession = {
       id,
@@ -1903,13 +1927,16 @@ export class CfshareManager {
 
     try {
       await this.copyInputsToWorkspace(params.paths, workspaceDir, ctx);
+      const rootBehavior = await this.detectWorkspaceRootBehavior(workspaceDir);
       const fileServer = await this.startFileServer({
         session,
         workspaceDir,
         mode,
         presentation,
         maxDownloads: session.maxDownloads,
-        directSingleFileRoot,
+        directSingleFileRoot: mode === "normal" && rootBehavior.directSingleFileRoot,
+        autoEnterSingleDirectory: mode === "normal" && rootBehavior.autoEnterSingleDirectory,
+        rootDirectories: rootBehavior.rootDirectories,
       });
 
       session.originServer = fileServer.server;

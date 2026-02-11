@@ -14,6 +14,8 @@ type RenderFileExplorerTemplateParams = {
   mode: "normal" | "zip";
   presentation: FilePresentationMode;
   manifest: ManifestEntry[];
+  autoEnterSingleDirectory?: boolean;
+  rootDirectories?: string[];
 };
 
 export function renderFileExplorerTemplate(params: RenderFileExplorerTemplateParams): string {
@@ -24,6 +26,8 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
       mode: params.mode,
       presentation: params.presentation,
       manifest: params.manifest,
+      autoEnterSingleDirectory: params.autoEnterSingleDirectory !== false,
+      rootDirectories: Array.isArray(params.rootDirectories) ? params.rootDirectories : [],
     }),
     "utf8",
   ).toString("base64");
@@ -264,7 +268,7 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
           return '<i data-lucide="' + meta.icon + '" class="' + meta.color + '" style="width: ' + String(size) + 'px; height: ' + String(size) + 'px"></i>';
         }
 
-        function buildData(manifest) {
+        function buildData(manifest, rootDirectories) {
           const items = [];
           const byId = new Map();
           const folderByPath = new Map();
@@ -312,6 +316,14 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
             folderStats.set(pathKey, { sizeBytes: 0, dateMs: 0 });
             return folder;
           };
+
+          for (const rootNameRaw of Array.isArray(rootDirectories) ? rootDirectories : []) {
+            const rootName = normalizePath(rootNameRaw);
+            if (!rootName || rootName.includes("/")) {
+              continue;
+            }
+            getFolder(rootName, rootName, "");
+          }
 
           for (const entry of manifest) {
             const normalized = normalizePath(entry && entry.name ? entry.name : "");
@@ -388,7 +400,10 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
           return { items: items, byId: byId };
         }
 
-        const data = buildData(Array.isArray(payload.manifest) ? payload.manifest : []);
+        const data = buildData(
+          Array.isArray(payload.manifest) ? payload.manifest : [],
+          Array.isArray(payload.rootDirectories) ? payload.rootDirectories : [],
+        );
         const rootChildren = data.items.filter(function (item) {
           return item.parentId === "root";
         });
@@ -398,8 +413,11 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
         const rootFiles = rootChildren.filter(function (item) {
           return item.type !== "folder";
         });
+        const shouldAutoEnterSingleDirectory = payload.autoEnterSingleDirectory !== false;
         const autoEnterFolder =
-          rootFolders.length === 1 && rootFiles.length === 0 ? rootFolders[0] : null;
+          shouldAutoEnterSingleDirectory && rootFolders.length === 1 && rootFiles.length === 0
+            ? rootFolders[0]
+            : null;
 
         const state = {
           currentPath: autoEnterFolder

@@ -76,7 +76,7 @@ export type ExposureSession = {
   sourcePort?: number;
   workspaceDir?: string;
   manifest?: ManifestEntry[];
-  fileMode?: "single" | "index" | "zip";
+  fileMode?: "normal" | "zip";
   filePresentation?: FilePresentationMode;
   maxDownloads?: number;
   process?: ChildProcessWithoutNullStreams;

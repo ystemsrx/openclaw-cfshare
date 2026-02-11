@@ -28,11 +28,11 @@ Use CFShare tools to create short-lived public links with safer defaults.
 
 - `env_check`: validate cloudflared/path/version and effective defaults.
 - `expose_port`: share `localhost:<port>` with optional token/basic auth.
-- `expose_files`: copy files into temporary workspace, start read-only server, expose it. Use `opts.presentation` to control file delivery style: `download` (default), `preview`, or `raw`.
+- `expose_files`: copy files into temporary workspace, start read-only server, expose it. Use `opts.mode` as `normal` (single file direct, multi-file index) or `zip` (bundle download), and `opts.presentation` to control delivery style: `download` (default), `preview`, or `raw`.
 - `exposure_list`: list sessions.
-- `exposure_get`: full status + usage snippets.
-- `exposure_stop`: stop one or all sessions and cleanup.
-- `exposure_logs`: inspect tunnel/origin logs.
+- `exposure_get`: full status + usage snippets. Supports `id`, `ids`, or `filter` with optional `fields` projection.
+- `exposure_stop`: stop one, many (`ids`), or all sessions and cleanup.
+- `exposure_logs`: inspect tunnel/origin logs for one or many sessions.
 - `maintenance`: guard/gc/set_policy lifecycle.
 - `audit_query`: search audit events.
 - `audit_export`: export audit events to local JSONL file.

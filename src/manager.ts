@@ -21,6 +21,8 @@ import type {
   CfsharePolicy,
   ExposureRecord,
   ExposureSession,
+  ExposureStatus,
+  ExposureType,
   FilePresentationMode,
   ManifestEntry,
   RateLimitPolicy,
@@ -63,6 +65,42 @@ type EnvCheckResult = {
 
 type ToolContext = {
   workspaceDir?: string;
+};
+
+type ExposureFilter = {
+  status?: ExposureStatus;
+  type?: ExposureType;
+};
+
+type ExposureGetField =
+  | "id"
+  | "type"
+  | "status"
+  | "port"
+  | "public_url"
+  | "expires_at"
+  | "local_url"
+  | "stats"
+  | "usage_snippets"
+  | "file_sharing"
+  | "last_error"
+  | "manifest"
+  | "created_at";
+
+type ExposureGetParams = {
+  id?: string;
+  ids?: string[];
+  filter?: ExposureFilter;
+  fields?: ExposureGetField[];
+  opts?: {
+    probe_public?: boolean;
+  };
+};
+
+type ExposureLogsOpts = {
+  lines?: number;
+  since_seconds?: number;
+  component?: "tunnel" | "origin" | "all";
 };
 
 function nowIso(): string {
@@ -749,7 +787,7 @@ export class CfshareManager {
   private async startFileServer(params: {
     session: ExposureSession;
     workspaceDir: string;
-    mode: "single" | "index" | "zip";
+    mode: "normal" | "zip";
     presentation: FilePresentationMode;
     maxDownloads?: number;
   }): Promise<FileServerHandle> {
@@ -808,26 +846,6 @@ export class CfshareManager {
       };
 
       try {
-        if (params.mode === "single") {
-          const single = manifest[0];
-          if (!single) {
-            res.writeHead(404, { "content-type": "application/json" });
-            res.end(JSON.stringify({ error: "empty_manifest" }));
-            return;
-          }
-          const filePath = path.join(params.workspaceDir, single.name);
-          await this.sendFileResponse({
-            req,
-            res,
-            session: params.session,
-            filePath,
-            presentation: params.presentation,
-            countAsDownload: true,
-          });
-          await checkMaxDownloads();
-          return;
-        }
-
         if (params.mode === "zip") {
           if (pathname === "/") {
             res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -852,6 +870,19 @@ export class CfshareManager {
         }
 
         if (pathname === "/") {
+          if (manifest.length === 1) {
+            const filePath = path.join(params.workspaceDir, manifest[0].name);
+            await this.sendFileResponse({
+              req,
+              res,
+              session: params.session,
+              filePath,
+              presentation: params.presentation,
+              countAsDownload: true,
+            });
+            await checkMaxDownloads();
+            return;
+          }
           const list = manifest
             .map((entry) => `<li><a href="${entry.relative_url}">${entry.name}</a> (${entry.size} bytes)</li>`)
             .join("\n");
@@ -1273,7 +1304,7 @@ export class CfshareManager {
     params: {
       paths: string[];
       opts?: {
-        mode?: "single" | "index" | "zip";
+        mode?: "normal" | "zip";
         presentation?: FilePresentationMode;
         ttl_seconds?: number;
         access?: AccessMode;
@@ -1290,7 +1321,7 @@ export class CfshareManager {
 
     const ttlSeconds = normalizeTtl(params.opts?.ttl_seconds, this.policy);
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
-    const mode = params.opts?.mode ?? "index";
+    const mode = params.opts?.mode ?? "normal";
     const presentation = normalizeFilePresentation(params.opts?.presentation);
     const accessMode = normalizeAccessMode(params.opts?.access, this.policy.defaultExposeFilesAccess);
     const protectOrigin = accessMode !== "none";
@@ -1407,19 +1438,114 @@ export class CfshareManager {
     return Array.from(this.sessions.values()).map((session) => this.makeExposureRecord(session));
   }
 
-  async exposureGet(
-    id: string,
+  private normalizeRequestedIds(rawIds: string[]): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const item of rawIds) {
+      if (typeof item !== "string") {
+        continue;
+      }
+      const id = item.trim();
+      if (!id || seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      out.push(id);
+    }
+    return out;
+  }
+
+  private matchesExposureFilter(session: ExposureSession, filter?: ExposureFilter): boolean {
+    if (!filter) {
+      return true;
+    }
+    if (filter.status && session.status !== filter.status) {
+      return false;
+    }
+    if (filter.type && session.type !== filter.type) {
+      return false;
+    }
+    return true;
+  }
+
+  private resolveExposureSelection(query: {
+    id?: string;
+    ids?: string[];
+    filter?: ExposureFilter;
+  }): { selectorUsed: boolean; selectedIds: string[]; missingIds: string[] } {
+    const explicitIds = this.normalizeRequestedIds([
+      ...(typeof query.id === "string" ? [query.id] : []),
+      ...((query.ids ?? []).filter((value): value is string => typeof value === "string")),
+    ]);
+
+    const hasAll = explicitIds.includes("all");
+    const allSessions = Array.from(this.sessions.values());
+
+    if (hasAll) {
+      const selectedIds = allSessions
+        .filter((session) => this.matchesExposureFilter(session, query.filter))
+        .map((session) => session.id);
+      return { selectorUsed: true, selectedIds, missingIds: [] };
+    }
+
+    if (explicitIds.length > 0) {
+      const selectedIds: string[] = [];
+      const missingIds: string[] = [];
+      for (const id of explicitIds) {
+        const session = this.sessions.get(id);
+        if (!session) {
+          missingIds.push(id);
+          continue;
+        }
+        if (this.matchesExposureFilter(session, query.filter)) {
+          selectedIds.push(id);
+        }
+      }
+      return { selectorUsed: true, selectedIds, missingIds };
+    }
+
+    if (query.filter) {
+      const selectedIds = allSessions
+        .filter((session) => this.matchesExposureFilter(session, query.filter))
+        .map((session) => session.id);
+      return { selectorUsed: true, selectedIds, missingIds: [] };
+    }
+
+    return { selectorUsed: false, selectedIds: [], missingIds: [] };
+  }
+
+  private makeUsageSnippets(session: ExposureSession): Record<string, string> {
+    const usageSnippets: Record<string, string> = {};
+    if (!session.publicUrl) {
+      return usageSnippets;
+    }
+
+    if (session.access.mode === "token" && session.access.token) {
+      usageSnippets.curl = `curl -L '${session.publicUrl}?token=${session.access.token}'`;
+      usageSnippets.wget = `wget -O - '${session.publicUrl}?token=${session.access.token}'`;
+      usageSnippets.powershell = `iwr '${session.publicUrl}?token=${session.access.token}'`;
+      return usageSnippets;
+    }
+
+    if (session.access.mode === "basic" && session.access.username && session.access.password) {
+      usageSnippets.curl = `curl -u '${session.access.username}:${session.access.password}' -L '${session.publicUrl}'`;
+      usageSnippets.wget = `wget --user='${session.access.username}' --password='${session.access.password}' -O - '${session.publicUrl}'`;
+      usageSnippets.powershell = `$p='${session.access.password}';$u='${session.access.username}';iwr '${session.publicUrl}' -Authentication Basic -Credential (New-Object System.Management.Automation.PSCredential($u,(ConvertTo-SecureString $p -AsPlainText -Force)))`;
+      return usageSnippets;
+    }
+
+    usageSnippets.curl = `curl -L '${session.publicUrl}'`;
+    usageSnippets.wget = `wget -O - '${session.publicUrl}'`;
+    usageSnippets.powershell = `iwr '${session.publicUrl}'`;
+    return usageSnippets;
+  }
+
+  private async buildExposureDetail(
+    session: ExposureSession,
     opts?: {
       probe_public?: boolean;
     },
   ): Promise<Record<string, unknown>> {
-    await this.ensureInitialized();
-
-    const session = this.sessions.get(id);
-    if (!session) {
-      return { id, status: "not_found" };
-    }
-
     const tunnelAlive = Boolean(session.process && !session.process.killed);
     const originAlive =
       session.type === "port"
@@ -1455,78 +1581,162 @@ export class CfshareManager {
       }
     }
 
-    const usageSnippets: Record<string, string> = {};
-    if (session.publicUrl) {
-      if (session.access.mode === "token" && session.access.token) {
-        usageSnippets.curl = `curl -L '${session.publicUrl}?token=${session.access.token}'`;
-        usageSnippets.wget = `wget -O - '${session.publicUrl}?token=${session.access.token}'`;
-        usageSnippets.powershell = `iwr '${session.publicUrl}?token=${session.access.token}'`;
-      } else if (
-        session.access.mode === "basic" &&
-        session.access.username &&
-        session.access.password
-      ) {
-        usageSnippets.curl = `curl -u '${session.access.username}:${session.access.password}' -L '${session.publicUrl}'`;
-        usageSnippets.wget = `wget --user='${session.access.username}' --password='${session.access.password}' -O - '${session.publicUrl}'`;
-        usageSnippets.powershell = `$p='${session.access.password}';$u='${session.access.username}';iwr '${session.publicUrl}' -Authentication Basic -Credential (New-Object System.Management.Automation.PSCredential($u,(ConvertTo-SecureString $p -AsPlainText -Force)))`;
-      } else {
-        usageSnippets.curl = `curl -L '${session.publicUrl}'`;
-        usageSnippets.wget = `wget -O - '${session.publicUrl}'`;
-        usageSnippets.powershell = `iwr '${session.publicUrl}'`;
-      }
-    }
-
     const fileSharing =
       session.type === "files"
         ? {
-            mode: session.fileMode ?? "index",
+            mode: session.fileMode ?? "normal",
             presentation: session.filePresentation ?? "download",
           }
         : undefined;
 
     return {
       id: session.id,
+      type: session.type,
+      created_at: session.createdAt,
       status: {
         state: session.status,
         tunnel_alive: tunnelAlive,
         origin_alive: originAlive,
         public_probe: publicProbe,
       },
+      port: {
+        source_port: session.sourcePort,
+        origin_port: session.originPort,
+        tunnel_port: session.tunnelPort,
+      },
       public_url: session.publicUrl,
       expires_at: session.expiresAt,
       local_url: session.localUrl,
       stats: session.stats,
-      usage_snippets: usageSnippets,
+      usage_snippets: this.makeUsageSnippets(session),
       file_sharing: fileSharing,
       last_error: session.lastError,
       manifest: session.manifest,
     };
   }
 
+  private projectExposureDetail(
+    detail: Record<string, unknown>,
+    fields?: ExposureGetField[],
+  ): Record<string, unknown> {
+    if (!fields || fields.length === 0) {
+      return detail;
+    }
+    const out: Record<string, unknown> = {
+      id: detail.id,
+    };
+    for (const field of fields) {
+      if (field === "id") {
+        continue;
+      }
+      if (Object.prototype.hasOwnProperty.call(detail, field)) {
+        out[field] = detail[field];
+      }
+    }
+    return out;
+  }
+
+  private makeExposureGetNotFound(id: string, fields?: ExposureGetField[]): Record<string, unknown> {
+    const out: Record<string, unknown> = { id, error: "not_found" };
+    if (fields?.includes("status")) {
+      out.status = "not_found";
+    }
+    return out;
+  }
+
+  async exposureGet(params: ExposureGetParams): Promise<Record<string, unknown>> {
+    await this.ensureInitialized();
+
+    const fields = Array.isArray(params.fields) ? this.normalizeRequestedIds(params.fields) : undefined;
+    const typedFields = fields as ExposureGetField[] | undefined;
+    const legacySingle =
+      Boolean(params.id) && params.id !== "all" && !params.ids && !params.filter && !params.fields;
+
+    const selection = this.resolveExposureSelection({
+      id: params.id,
+      ids: params.ids,
+      filter: params.filter,
+    });
+
+    if (!selection.selectorUsed) {
+      throw new Error("id, ids, or filter is required");
+    }
+
+    if (legacySingle) {
+      const legacyId = params.id as string;
+      const session = this.sessions.get(legacyId);
+      if (!session) {
+        return { id: legacyId, status: "not_found" };
+      }
+      return await this.buildExposureDetail(session, params.opts);
+    }
+
+    const items: Record<string, unknown>[] = [];
+    for (const id of selection.selectedIds) {
+      const session = this.sessions.get(id);
+      if (!session) {
+        items.push(this.makeExposureGetNotFound(id, typedFields));
+        continue;
+      }
+      const detail = await this.buildExposureDetail(session, params.opts);
+      items.push(this.projectExposureDetail(detail, typedFields));
+    }
+    for (const missingId of selection.missingIds) {
+      items.push(this.makeExposureGetNotFound(missingId, typedFields));
+    }
+
+    return {
+      items,
+      count: items.length,
+      matched_ids: selection.selectedIds,
+      missing_ids: selection.missingIds,
+      filter: params.filter,
+      fields: typedFields,
+    };
+  }
+
   async stopExposure(
-    idOrAll: string,
+    idOrIds: string | string[],
     opts?: { reason?: string; expired?: boolean; keepAudit?: boolean },
   ): Promise<Record<string, unknown>> {
     await this.ensureInitialized();
 
-    const ids =
-      idOrAll === "all"
-        ? Array.from(this.sessions.keys())
-        : this.sessions.has(idOrAll)
-          ? [idOrAll]
-          : [];
+    const requested = this.normalizeRequestedIds(Array.isArray(idOrIds) ? idOrIds : [idOrIds]);
+    if (requested.length === 0) {
+      return { stopped: [], failed: [{ id: "unknown", error: "id or ids is required" }], cleaned: [] };
+    }
 
-    if (ids.length === 0) {
-      return { stopped: [], failed: [{ id: idOrAll, error: "not_found" }], cleaned: [] };
+    const includeAll = requested.includes("all");
+    const ids: string[] = [];
+    const failed: Array<{ id: string; error: string }> = [];
+
+    if (includeAll) {
+      ids.push(...Array.from(this.sessions.keys()));
+      if (ids.length === 0) {
+        return { stopped: [], failed: [{ id: "all", error: "not_found" }], cleaned: [] };
+      }
+    } else {
+      for (const id of requested) {
+        if (this.sessions.has(id)) {
+          ids.push(id);
+        } else {
+          failed.push({ id, error: "not_found" });
+        }
+      }
+    }
+
+    const stopIds = this.normalizeRequestedIds(ids);
+    if (stopIds.length === 0) {
+      return { stopped: [], failed, cleaned: [] };
     }
 
     const stopped: string[] = [];
-    const failed: Array<{ id: string; error: string }> = [];
     const cleaned: string[] = [];
 
-    for (const id of ids) {
+    for (const id of stopIds) {
       const session = this.sessions.get(id);
       if (!session) {
+        failed.push({ id, error: "not_found" });
         continue;
       }
       try {
@@ -1577,19 +1787,7 @@ export class CfshareManager {
     return { stopped, failed, cleaned };
   }
 
-  exposureLogs(
-    id: string,
-    opts?: {
-      lines?: number;
-      since_seconds?: number;
-      component?: "tunnel" | "origin" | "all";
-    },
-  ): Record<string, unknown> {
-    const session = this.sessions.get(id);
-    if (!session) {
-      return { id, component: opts?.component ?? "all", lines: [], error: "not_found" };
-    }
-
+  private exposureLogsOne(session: ExposureSession, opts?: ExposureLogsOpts): Record<string, unknown> {
     const lines = Math.max(1, Math.min(10_000, Math.trunc(opts?.lines ?? 200)));
     const component = opts?.component ?? "all";
     const threshold =
@@ -1608,11 +1806,49 @@ export class CfshareManager {
     });
 
     return {
-      id,
+      id: session.id,
       component,
       lines: filtered
         .slice(-lines)
         .map((entry) => `${entry.ts} [${entry.component}] ${entry.line}`),
+    };
+  }
+
+  exposureLogs(idOrIds: string | string[], opts?: ExposureLogsOpts): Record<string, unknown> {
+    const requested = this.normalizeRequestedIds(Array.isArray(idOrIds) ? idOrIds : [idOrIds]);
+    if (requested.length === 0) {
+      return { items: [], missing_ids: [], error: "id or ids is required" };
+    }
+
+    const includeAll = requested.includes("all");
+    const targetIds = includeAll ? Array.from(this.sessions.keys()) : requested;
+
+    const singleLegacy = !Array.isArray(idOrIds) && !includeAll;
+    if (singleLegacy) {
+      const session = this.sessions.get(targetIds[0] ?? "");
+      if (!session) {
+        return { id: idOrIds, component: opts?.component ?? "all", lines: [], error: "not_found" };
+      }
+      return this.exposureLogsOne(session, opts);
+    }
+
+    const missingIds: string[] = [];
+    const items: Record<string, unknown>[] = [];
+    for (const id of targetIds) {
+      const session = this.sessions.get(id);
+      if (!session) {
+        missingIds.push(id);
+        items.push({ id, component: opts?.component ?? "all", lines: [], error: "not_found" });
+        continue;
+      }
+      items.push(this.exposureLogsOne(session, opts));
+    }
+
+    return {
+      items,
+      requested_count: targetIds.length,
+      found_count: targetIds.length - missingIds.length,
+      missing_ids: missingIds,
     };
   }
 

@@ -61,7 +61,7 @@ function registerToolsForContext(api: OpenClawPluginApi, ctx: ToolContext) {
         params: {
           paths: string[];
           opts?: {
-            mode?: "single" | "index" | "zip";
+            mode?: "normal" | "zip";
             presentation?: "download" | "preview" | "raw";
             ttl_seconds?: number;
             access?: "token" | "basic" | "none";
@@ -84,46 +84,77 @@ function registerToolsForContext(api: OpenClawPluginApi, ctx: ToolContext) {
     {
       name: "exposure_get",
       label: "CFShare Exposure Get",
-      description: "Get detailed exposure status, health, stats, and one-click usage snippets",
+      description: "Get detailed exposure info by id(s) or filter, with optional field projection",
       parameters: ExposureGetSchema,
       async execute(
         _toolCallId: string,
         params: {
-          id: string;
+          id?: string;
+          ids?: string[];
+          filter?: {
+            status?: "starting" | "running" | "stopped" | "error" | "expired";
+            type?: "port" | "files";
+          };
+          fields?: Array<
+            | "id"
+            | "type"
+            | "status"
+            | "port"
+            | "public_url"
+            | "expires_at"
+            | "local_url"
+            | "stats"
+            | "usage_snippets"
+            | "file_sharing"
+            | "last_error"
+            | "manifest"
+            | "created_at"
+          >;
           opts?: {
             probe_public?: boolean;
           };
         },
       ) {
-        return jsonResult(await manager.exposureGet(params.id, params.opts));
+        return jsonResult(await manager.exposureGet(params));
       },
     },
     {
       name: "exposure_stop",
       label: "CFShare Exposure Stop",
-      description: "Stop one exposure or all exposures, terminate processes, and clean temporary resources",
+      description:
+        "Stop one exposure, multiple exposures, or all exposures; terminate processes and clean temporary resources",
       parameters: ExposureStopSchema,
       async execute(
         _toolCallId: string,
         params: {
-          id: string;
+          id?: string;
+          ids?: string[];
           opts?: {
             reason?: string;
           };
         },
       ) {
-        return jsonResult(await manager.stopExposure(params.id, params.opts));
+        const target = params.ids ?? params.id;
+        if (!target) {
+          return jsonResult({
+            stopped: [],
+            failed: [{ id: "unknown", error: "id or ids is required" }],
+            cleaned: [],
+          });
+        }
+        return jsonResult(await manager.stopExposure(target, params.opts));
       },
     },
     {
       name: "exposure_logs",
       label: "CFShare Exposure Logs",
-      description: "Fetch merged logs from cloudflared and origin components for one exposure",
+      description: "Fetch merged logs from cloudflared and origin components for one or many exposures",
       parameters: ExposureLogsSchema,
       async execute(
         _toolCallId: string,
         params: {
-          id: string;
+          id?: string;
+          ids?: string[];
           opts?: {
             lines?: number;
             since_seconds?: number;
@@ -131,7 +162,15 @@ function registerToolsForContext(api: OpenClawPluginApi, ctx: ToolContext) {
           };
         },
       ) {
-        return jsonResult(manager.exposureLogs(params.id, params.opts));
+        const target = params.ids ?? params.id;
+        if (!target) {
+          return jsonResult({
+            items: [],
+            missing_ids: [],
+            error: "id or ids is required",
+          });
+        }
+        return jsonResult(manager.exposureLogs(target, params.opts));
       },
     },
     {

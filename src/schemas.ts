@@ -5,7 +5,7 @@ const AccessMode = stringEnum(["token", "basic", "none"] as const, {
   description: "Access mode",
 });
 
-const FileMode = stringEnum(["single", "index", "zip"] as const, {
+const FileMode = stringEnum(["normal", "zip"] as const, {
   description: "File exposure mode",
 });
 
@@ -16,6 +16,35 @@ const FilePresentationMode = stringEnum(["download", "preview", "raw"] as const,
 const ComponentMode = stringEnum(["tunnel", "origin", "all"] as const, {
   description: "Log component",
 });
+
+const ExposureType = stringEnum(["port", "files"] as const, {
+  description: "Exposure type",
+});
+
+const ExposureStatus = stringEnum(["starting", "running", "stopped", "error", "expired"] as const, {
+  description: "Exposure status",
+});
+
+const ExposureGetField = stringEnum(
+  [
+    "id",
+    "type",
+    "status",
+    "port",
+    "public_url",
+    "expires_at",
+    "local_url",
+    "stats",
+    "usage_snippets",
+    "file_sharing",
+    "last_error",
+    "manifest",
+    "created_at",
+  ] as const,
+  {
+    description: "Fields to return",
+  },
+);
 
 const MaintenanceAction = stringEnum(["start_guard", "run_gc", "set_policy"] as const, {
   description: "Maintenance action",
@@ -62,54 +91,114 @@ export const ExposeFilesSchema = Type.Object(
 
 export const ExposureListSchema = Type.Object({}, { additionalProperties: false });
 
-export const ExposureGetSchema = Type.Object(
+const ExposureGetOptsSchema = Type.Object(
   {
-    id: Type.String({ minLength: 2 }),
-    opts: Type.Optional(
-      Type.Object(
-        {
-          probe_public: Type.Optional(Type.Boolean()),
-        },
-        { additionalProperties: false },
-      ),
-    ),
+    probe_public: Type.Optional(Type.Boolean()),
   },
   { additionalProperties: false },
 );
 
-export const ExposureStopSchema = Type.Object(
+const ExposureGetFieldsSchema = Type.Array(ExposureGetField, {
+  minItems: 1,
+  maxItems: 32,
+  uniqueItems: true,
+});
+
+const ExposureGetFilterSchema = Type.Object(
   {
-    id: Type.String({
-      minLength: 1,
-      description: `Exposure id or "all"`,
-    }),
-    opts: Type.Optional(
-      Type.Object(
-        {
-          reason: Type.Optional(Type.String()),
-        },
-        { additionalProperties: false },
-      ),
-    ),
+    status: Type.Optional(ExposureStatus),
+    type: Type.Optional(ExposureType),
   },
   { additionalProperties: false },
 );
 
-export const ExposureLogsSchema = Type.Object(
-  {
-    id: Type.String({ minLength: 2 }),
-    opts: Type.Optional(
-      Type.Object(
-        {
-          lines: Type.Optional(Type.Number({ minimum: 1, maximum: 10_000 })),
-          since_seconds: Type.Optional(Type.Number({ minimum: 1, maximum: 365 * 24 * 3600 })),
-          component: Type.Optional(ComponentMode),
-        },
-        { additionalProperties: false },
-      ),
+export const ExposureGetSchema = Type.Union(
+  [
+    Type.Object(
+      {
+        id: Type.String({ minLength: 1 }),
+        fields: Type.Optional(ExposureGetFieldsSchema),
+        opts: Type.Optional(ExposureGetOptsSchema),
+      },
+      { additionalProperties: false },
     ),
+    Type.Object(
+      {
+        ids: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 4096 }),
+        fields: Type.Optional(ExposureGetFieldsSchema),
+        opts: Type.Optional(ExposureGetOptsSchema),
+      },
+      { additionalProperties: false },
+    ),
+    Type.Object(
+      {
+        filter: ExposureGetFilterSchema,
+        fields: Type.Optional(ExposureGetFieldsSchema),
+        opts: Type.Optional(ExposureGetOptsSchema),
+      },
+      { additionalProperties: false },
+    ),
+  ],
+  { description: "Get one/many exposures, or query by filter" },
+);
+
+const ExposureStopOptsSchema = Type.Object(
+  {
+    reason: Type.Optional(Type.String()),
   },
   { additionalProperties: false },
+);
+
+export const ExposureStopSchema = Type.Union(
+  [
+    Type.Object(
+      {
+        id: Type.String({
+          minLength: 1,
+          description: `Exposure id or "all"`,
+        }),
+        opts: Type.Optional(ExposureStopOptsSchema),
+      },
+      { additionalProperties: false },
+    ),
+    Type.Object(
+      {
+        ids: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 4096 }),
+        opts: Type.Optional(ExposureStopOptsSchema),
+      },
+      { additionalProperties: false },
+    ),
+  ],
+  { description: "Stop one/many exposures, or all" },
+);
+
+const ExposureLogsOptsSchema = Type.Object(
+  {
+    lines: Type.Optional(Type.Number({ minimum: 1, maximum: 10_000 })),
+    since_seconds: Type.Optional(Type.Number({ minimum: 1, maximum: 365 * 24 * 3600 })),
+    component: Type.Optional(ComponentMode),
+  },
+  { additionalProperties: false },
+);
+
+export const ExposureLogsSchema = Type.Union(
+  [
+    Type.Object(
+      {
+        id: Type.String({ minLength: 1 }),
+        opts: Type.Optional(ExposureLogsOptsSchema),
+      },
+      { additionalProperties: false },
+    ),
+    Type.Object(
+      {
+        ids: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 4096 }),
+        opts: Type.Optional(ExposureLogsOptsSchema),
+      },
+      { additionalProperties: false },
+    ),
+  ],
+  { description: "Read logs for one/many exposures" },
 );
 
 export const MaintenanceSchema = Type.Object(
@@ -135,7 +224,7 @@ export const AuditQuerySchema = Type.Object(
         {
           id: Type.Optional(Type.String()),
           event: Type.Optional(Type.String()),
-          type: Type.Optional(stringEnum(["port", "files"] as const)),
+          type: Type.Optional(ExposureType),
           from_ts: Type.Optional(Type.String({ description: "ISO timestamp" })),
           to_ts: Type.Optional(Type.String({ description: "ISO timestamp" })),
           limit: Type.Optional(Type.Number({ minimum: 1, maximum: 10000 })),
@@ -156,7 +245,7 @@ export const AuditExportSchema = Type.Object(
           to_ts: Type.Optional(Type.String({ description: "ISO timestamp" })),
           id: Type.Optional(Type.String()),
           event: Type.Optional(Type.String()),
-          type: Type.Optional(stringEnum(["port", "files"] as const)),
+          type: Type.Optional(ExposureType),
           output_path: Type.Optional(Type.String()),
         },
         { additionalProperties: false },

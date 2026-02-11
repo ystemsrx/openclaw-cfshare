@@ -1,0 +1,65 @@
+{
+  "id": "cfshare",
+  "name": "CFShare",
+  "description": "Secure Cloudflare Quick Tunnel wrapper for temporary port and file exposure",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "stateDir": { "type": "string" },
+      "cloudflaredPath": { "type": "string" },
+      "policyFile": { "type": "string" },
+      "ignoreFile": { "type": "string" },
+      "defaultTtlSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+      "maxTtlSeconds": { "type": "integer", "minimum": 60, "maximum": 604800 },
+      "defaultExposePortAccess": { "type": "string", "enum": ["token", "basic", "none"] },
+      "defaultExposeFilesAccess": { "type": "string", "enum": ["token", "basic", "none"] },
+      "blockedPorts": {
+        "type": "array",
+        "items": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      },
+      "allowedPathRoots": {
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "tunnel": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "edgeIpVersion": { "type": "string", "enum": ["4", "6", "auto"] },
+          "protocol": { "type": "string", "enum": ["http2", "quic", "auto"] }
+        }
+      },
+      "rateLimit": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "windowMs": { "type": "integer", "minimum": 1000, "maximum": 3600000 },
+          "maxRequests": { "type": "integer", "minimum": 1, "maximum": 100000 }
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "cloudflaredPath": {
+      "label": "cloudflared Path",
+      "placeholder": "cloudflared",
+      "help": "Binary name or absolute path"
+    },
+    "stateDir": {
+      "label": "State Directory",
+      "placeholder": "~/.openclaw/cfshare",
+      "advanced": true
+    },
+    "defaultTtlSeconds": {
+      "label": "Default TTL (seconds)",
+      "help": "Default expiration for new exposures"
+    },
+    "maxTtlSeconds": {
+      "label": "Max TTL (seconds)",
+      "help": "Upper TTL limit enforced by policy"
+    }
+  }
+}

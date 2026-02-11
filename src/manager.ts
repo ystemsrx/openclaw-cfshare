@@ -12,6 +12,7 @@ import ignore from "ignore";
 import { lookup as mimeLookup } from "mime-types";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import yazl from "yazl";
+import { renderMarkdownPreviewTemplate } from "./markdownPreviewTemplate.js";
 import { loadPolicy } from "./policy.js";
 import type {
   AccessMode,
@@ -31,6 +32,7 @@ import type {
 const MAX_LOG_LINES = 4000;
 const DEFAULT_PROBE_TIMEOUT_MS = 3000;
 const CLOUDFLARE_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com\b/i;
+const MARKDOWN_PREVIEW_EXTENSIONS = new Set([".md", ".rmd", ".qmd"]);
 
 type RateLimitState = {
   windowStart: number;
@@ -239,6 +241,30 @@ function isTextLikeMime(mime: string): boolean {
     base === "application/graphql" ||
     base === "application/sql"
   );
+}
+
+function shouldRenderMarkdownPreview(filePath: string, presentation: FilePresentationMode): boolean {
+  if (presentation !== "preview") {
+    return false;
+  }
+  return MARKDOWN_PREVIEW_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
+function stripLeadingFrontMatter(input: string): string {
+  const source = input.replace(/^\uFEFF/, "");
+  const match = source.match(/^---\r?\n[\s\S]*?\r?\n(?:---|\.\.\.)\r?\n?/);
+  if (!match) {
+    return source;
+  }
+  return source.slice(match[0].length);
+}
+
+function buildMarkdownPreviewHtml(params: { title: string; markdown: string }): string {
+  const payload = Buffer.from(stripLeadingFrontMatter(params.markdown), "utf8").toString("base64");
+  return renderMarkdownPreviewTemplate({
+    title: params.title,
+    payload,
+  });
 }
 
 function resolveBinPath(bin: string): string | undefined {
@@ -696,6 +722,32 @@ export class CfshareManager {
     if (method !== "GET" && method !== "HEAD") {
       params.res.writeHead(405, { "content-type": "application/json" });
       params.res.end(JSON.stringify({ error: "method_not_allowed" }));
+      return;
+    }
+
+    if (shouldRenderMarkdownPreview(params.filePath, presentation)) {
+      const fileRaw = await fs.readFile(params.filePath, "utf8");
+      const previewHtml = buildMarkdownPreviewHtml({
+        title: params.downloadName ?? path.basename(params.filePath),
+        markdown: fileRaw,
+      });
+      const body = Buffer.from(previewHtml, "utf8");
+      const headers: Record<string, string> = {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "content-length": String(body.length),
+      };
+      params.res.writeHead(200, headers);
+      if (method === "HEAD") {
+        params.res.end();
+        return;
+      }
+      if (params.countAsDownload) {
+        params.session.stats.downloads += 1;
+      }
+      params.session.stats.bytesSent += body.length;
+      params.res.end(body);
       return;
     }
 

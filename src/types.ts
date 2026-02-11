@@ -62,6 +62,8 @@ export type ManifestEntry = {
   sha256: string;
   relative_url: string;
   modified_at?: string;
+  is_binary?: boolean;
+  preview_supported?: boolean;
 };
 
 export type ExposureSession = {

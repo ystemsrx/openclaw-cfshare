@@ -346,6 +346,11 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
               date: formatDate(modifiedAt),
               dateMs: Number.isFinite(modifiedMs) ? modifiedMs : 0,
               relativeUrl: entry && entry.relative_url ? String(entry.relative_url) : "/" + normalized,
+              isBinary: entry && typeof entry.is_binary === "boolean" ? Boolean(entry.is_binary) : undefined,
+              previewSupported:
+                entry && typeof entry.preview_supported === "boolean"
+                  ? Boolean(entry.preview_supported)
+                  : undefined,
             };
             items.push(fileItem);
             byId.set(fileItem.id, fileItem);
@@ -455,6 +460,254 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
           return imageExtensions.has(String(item.type).toLowerCase());
         }
 
+        const textLikeExtensions = new Set([
+          "txt",
+          "log",
+          "md",
+          "markdown",
+          "rmd",
+          "qmd",
+          "json",
+          "json5",
+          "yaml",
+          "yml",
+          "toml",
+          "ini",
+          "conf",
+          "config",
+          "env",
+          "properties",
+          "xml",
+          "csv",
+          "tsv",
+          "dat",
+          "sql",
+          "graphql",
+          "js",
+          "jsx",
+          "mjs",
+          "cjs",
+          "ts",
+          "tsx",
+          "html",
+          "htm",
+          "css",
+          "scss",
+          "less",
+          "sass",
+          "styl",
+          "vue",
+          "svelte",
+          "py",
+          "java",
+          "c",
+          "h",
+          "cpp",
+          "hpp",
+          "cc",
+          "cxx",
+          "go",
+          "rs",
+          "php",
+          "rb",
+          "erb",
+          "swift",
+          "kt",
+          "kts",
+          "dart",
+          "lua",
+          "pl",
+          "pm",
+          "r",
+          "sh",
+          "bat",
+          "cmd",
+          "ps1",
+          "bash",
+          "zsh",
+          "fish",
+          "dockerfile",
+          "makefile",
+          "gitignore",
+          "editorconfig",
+        ]);
+
+        const previewSupportedExtensions = new Set([
+          "md",
+          "markdown",
+          "rmd",
+          "qmd",
+          "html",
+          "htm",
+          "svg",
+        ]);
+
+        const knownBinaryExtensions = new Set([
+          "pdf",
+          "doc",
+          "docx",
+          "pages",
+          "odt",
+          "rtf",
+          "xlsx",
+          "xls",
+          "numbers",
+          "ods",
+          "ppt",
+          "pptx",
+          "key",
+          "odp",
+          "mp3",
+          "wav",
+          "flac",
+          "ogg",
+          "m4a",
+          "aac",
+          "wma",
+          "aiff",
+          "mp4",
+          "mov",
+          "avi",
+          "mkv",
+          "webm",
+          "wmv",
+          "flv",
+          "3gp",
+          "m4v",
+          "zip",
+          "rar",
+          "7z",
+          "tar",
+          "gz",
+          "bz2",
+          "xz",
+          "iso",
+          "tgz",
+          "exe",
+          "dmg",
+          "msi",
+          "bin",
+          "app",
+          "deb",
+          "rpm",
+          "apk",
+          "ipa",
+          "db",
+          "sqlite",
+          "db3",
+          "whl",
+          "jar",
+          "class",
+          "war",
+        ]);
+
+        function getItemExtension(item) {
+          if (!item) {
+            return "";
+          }
+          return String(item.type || getExtension(item.name)).toLowerCase();
+        }
+
+        function isBinaryItem(item) {
+          if (!item || item.type === "folder") {
+            return false;
+          }
+          if (typeof item.isBinary === "boolean") {
+            return item.isBinary;
+          }
+          const extension = getItemExtension(item);
+          if (textLikeExtensions.has(extension)) {
+            return false;
+          }
+          if (imageExtensions.has(extension)) {
+            return true;
+          }
+          if (knownBinaryExtensions.has(extension)) {
+            return true;
+          }
+          return false;
+        }
+
+        function supportsPreview(item) {
+          if (!item || item.type === "folder") {
+            return false;
+          }
+          if (typeof item.previewSupported === "boolean") {
+            return item.previewSupported;
+          }
+          if (isBinaryItem(item)) {
+            return false;
+          }
+          return previewSupportedExtensions.has(getItemExtension(item));
+        }
+
+        function buildActionUrl(item, action) {
+          if (!item) {
+            return null;
+          }
+
+          let relativeUrl = "";
+          if (action === "folder-zip") {
+            const folderPath = normalizePath(item.pathKey || "");
+            if (!folderPath) {
+              return null;
+            }
+            relativeUrl = "/__cfshare__/download-folder.zip?path=" + encodeURIComponent(folderPath);
+          } else {
+            if (!item.relativeUrl) {
+              return null;
+            }
+            relativeUrl = item.relativeUrl;
+          }
+
+          try {
+            const target = new URL(relativeUrl, window.location.origin);
+            const current = new URL(window.location.href);
+            const currentToken = current.searchParams.get("token");
+            if (currentToken && !target.searchParams.get("token")) {
+              target.searchParams.set("token", currentToken);
+            }
+            if (action === "preview" || action === "raw" || action === "download") {
+              target.searchParams.set("delivery", action);
+            }
+            return target.toString();
+          } catch {
+            return null;
+          }
+        }
+
+        function openItemAction(item, action) {
+          const openUrl = buildActionUrl(item, action);
+          if (!openUrl) {
+            return;
+          }
+          if (action === "preview" || action === "raw") {
+            window.open(openUrl, "_blank", "noopener");
+            return;
+          }
+          window.location.href = openUrl;
+        }
+
+        function openPreviewOrRaw(item) {
+          if (!item || item.type === "folder") {
+            return;
+          }
+          openItemAction(item, supportsPreview(item) ? "preview" : "raw");
+        }
+
+        function getInlinePreviewUrl(item) {
+          if (!item || item.type === "folder") {
+            return null;
+          }
+          if (supportsPreview(item)) {
+            return buildActionUrl(item, "preview");
+          }
+          if (!isBinaryItem(item)) {
+            return buildActionUrl(item, "raw");
+          }
+          return null;
+        }
+
         function setSelectedFile(itemId) {
           state.selectedFileId = itemId;
           const selected = itemId ? data.byId.get(itemId) || null : null;
@@ -499,30 +752,6 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
           renderFileArea();
         }
 
-        function openFile(item) {
-          if (!item || item.type === "folder" || !item.relativeUrl) {
-            return;
-          }
-          const openUrl = (function () {
-            try {
-              const target = new URL(item.relativeUrl, window.location.origin);
-              const current = new URL(window.location.href);
-              const currentToken = current.searchParams.get("token");
-              if (currentToken && !target.searchParams.get("token")) {
-                target.searchParams.set("token", currentToken);
-              }
-              return target.toString();
-            } catch {
-              return item.relativeUrl;
-            }
-          })();
-          if (state.presentation === "preview") {
-            window.open(openUrl, "_blank", "noopener");
-            return;
-          }
-          window.location.href = openUrl;
-        }
-
         function onItemDoubleClick(item) {
           if (!item) {
             return;
@@ -531,7 +760,15 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
             navigateToFolder(item.id, item.name);
             return;
           }
-          openFile(item);
+          if (supportsPreview(item)) {
+            openItemAction(item, "preview");
+            return;
+          }
+          if (isBinaryItem(item)) {
+            openItemAction(item, "download");
+            return;
+          }
+          openPreviewOrRaw(item);
         }
 
         function renderBreadcrumb() {
@@ -615,10 +852,44 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
             + '<button data-download-id="'
             + escapeHtml(file.id)
             + '" class="text-gray-400 hover:text-blue-600 transition-colors" title="'
-            + (file.type === "folder" ? "打包下载" : state.presentation === "preview" ? "预览文件" : "下载文件")
+            + (file.type === "folder" ? "打包下载" : "下载文件")
             + '">'
             + '<i data-lucide="download" style="width: 18px; height: 18px"></i>'
             + "</button></td></tr>";
+        }
+
+        function renderPanelActions(panelFile) {
+          if (panelFile.type === "folder") {
+            return '<button id="panel-folder-download" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
+              + '<i data-lucide="download" style="width: 16px; height: 16px"></i>'
+              + "打包下载"
+              + "</button>";
+          }
+
+          if (isImageItem(panelFile)) {
+            return '<button id="panel-download" class="w-full bg-white hover:bg-gray-100 border border-gray-200 text-slate-700 py-2 rounded-lg font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
+              + '<i data-lucide="download" style="width: 16px; height: 16px"></i>'
+              + "下载"
+              + "</button>";
+          }
+
+          if (supportsPreview(panelFile) || !isBinaryItem(panelFile)) {
+            return '<div class="grid grid-cols-2 gap-2">'
+              + '<button id="panel-preview" class="bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
+              + '<i data-lucide="eye" style="width: 16px; height: 16px"></i>'
+              + "预览"
+              + "</button>"
+              + '<button id="panel-download" class="bg-white hover:bg-gray-100 border border-gray-200 text-slate-700 py-2 rounded-lg font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
+              + '<i data-lucide="download" style="width: 16px; height: 16px"></i>'
+              + "下载"
+              + "</button>"
+              + "</div>";
+          }
+
+          return '<button id="panel-download" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
+            + '<i data-lucide="download" style="width: 16px; height: 16px"></i>'
+            + "下载文件"
+            + "</button>";
         }
 
         function renderFileArea() {
@@ -697,7 +968,7 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
             + '<p class="text-sm text-gray-500 mt-1 uppercase">'
             + escapeHtml(panelFile.type === "file" ? "FILE" : String(panelFile.type).toUpperCase())
             + "</p></div>"
-            + '<div class="p-6 space-y-6 flex-1">'
+            + '<div class="p-6 space-y-6 flex-1 min-h-0 overflow-y-auto">'
             + '<div class="space-y-4">'
             + '<div class="flex items-start gap-3"><div class="mt-0.5 text-gray-400"><i data-lucide="hard-drive" style="width: 16px; height: 16px"></i></div><div><p class="text-xs font-medium text-gray-500">大小</p><p class="text-sm text-slate-700 font-medium">'
             + escapeHtml(panelFile.size)
@@ -710,18 +981,20 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
             + "</p></div></div>"
             + "</div>"
             + (isImageItem(panelFile)
-              ? '<div class="bg-gray-50 rounded-lg p-3"><p class="text-xs font-semibold text-gray-400 mb-2">预览</p><div class="w-full aspect-video bg-gray-200 rounded flex items-center justify-center text-gray-400"><i data-lucide="image" style="width: 24px; height: 24px"></i></div></div>'
+              ? '<div class="bg-gray-50 rounded-lg p-3"><p class="text-xs font-semibold text-gray-400 mb-2">预览</p><div class="w-full max-h-72 overflow-auto bg-gray-200 rounded flex items-center justify-center">'
+                + (getInlinePreviewUrl(panelFile)
+                  ? '<img src="'
+                    + escapeHtml(getInlinePreviewUrl(panelFile) || "")
+                    + '" alt="'
+                    + escapeHtml(panelFile.name)
+                    + '" class="max-w-full max-h-72 object-contain" loading="lazy" />'
+                  : '<i data-lucide="image" style="width: 24px; height: 24px"></i>')
+                + "</div></div>"
               : "")
             + "</div>"
             + '<div class="p-4 border-t border-gray-100 bg-gray-50">'
-            + '<button id="panel-primary" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
-            + '<i data-lucide="download" style="width: 16px; height: 16px"></i>'
-            + (panelFile.type === "folder"
-              ? "打包下载"
-              : state.presentation === "preview"
-                ? "预览文件"
-                : "下载文件")
-            + "</button></div>";
+            + renderPanelActions(panelFile)
+            + "</div>";
 
           const closeButton = document.getElementById("panel-close");
           if (closeButton) {
@@ -730,13 +1003,33 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
             });
           }
 
-          const primaryButton = document.getElementById("panel-primary");
-          if (primaryButton) {
-            primaryButton.addEventListener("click", function () {
+          const panelPreviewButton = document.getElementById("panel-preview");
+          if (panelPreviewButton) {
+            panelPreviewButton.addEventListener("click", function () {
               if (!state.panelFile || state.panelFile.type === "folder") {
                 return;
               }
-              openFile(state.panelFile);
+              openPreviewOrRaw(state.panelFile);
+            });
+          }
+
+          const panelDownloadButton = document.getElementById("panel-download");
+          if (panelDownloadButton) {
+            panelDownloadButton.addEventListener("click", function () {
+              if (!state.panelFile || state.panelFile.type === "folder") {
+                return;
+              }
+              openItemAction(state.panelFile, "download");
+            });
+          }
+
+          const panelFolderDownloadButton = document.getElementById("panel-folder-download");
+          if (panelFolderDownloadButton) {
+            panelFolderDownloadButton.addEventListener("click", function () {
+              if (!state.panelFile || state.panelFile.type !== "folder") {
+                return;
+              }
+              openItemAction(state.panelFile, "folder-zip");
             });
           }
 
@@ -796,8 +1089,8 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
               event.stopPropagation();
               const fileId = String(downloadButton.getAttribute("data-download-id") || "");
               const file = data.byId.get(fileId);
-              if (file && file.type !== "folder") {
-                openFile(file);
+              if (file) {
+                openItemAction(file, file.type === "folder" ? "folder-zip" : "download");
               }
               return;
             }

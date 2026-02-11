@@ -39,7 +39,20 @@ const MAX_EXPOSURE_LOG_LINES_RESPONSE = 1000;
 const DEFAULT_PROBE_TIMEOUT_MS = 3000;
 const CLOUDFLARE_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com\b/gi;
 const MARKDOWN_PREVIEW_EXTENSIONS = new Set([".md", ".rmd", ".qmd"]);
+const INLINE_TEXT_PREVIEW_EXTENSIONS = new Set([".html", ".htm", ".svg"]);
+const BINARY_MIME_PREFIXES = ["image/", "audio/", "video/", "font/"];
+const BINARY_MIME_EXACT = new Set([
+  "application/pdf",
+  "application/zip",
+  "application/x-zip-compressed",
+  "application/gzip",
+  "application/x-gzip",
+  "application/x-7z-compressed",
+  "application/x-rar-compressed",
+  "application/octet-stream",
+]);
 const INVALID_QUICK_TUNNEL_SUBDOMAINS = new Set(["api"]);
+const WINDOWS_METADATA_SUFFIX_RE = /:zone\.identifier$/i;
 
 type RateLimitState = {
   windowStart: number;
@@ -239,6 +252,36 @@ function normalizeFilePresentation(value: unknown): FilePresentationMode {
   return "download";
 }
 
+function parseRequestedPresentation(input: unknown): FilePresentationMode | undefined {
+  if (input === "preview" || input === "raw" || input === "download") {
+    return input;
+  }
+  return undefined;
+}
+
+function resolveRequestPresentation(url: URL, fallback: FilePresentationMode): FilePresentationMode {
+  const requested =
+    parseRequestedPresentation(ensureString(url.searchParams.get("delivery"))) ??
+    parseRequestedPresentation(ensureString(url.searchParams.get("presentation"))) ??
+    parseRequestedPresentation(ensureString(url.searchParams.get("view")));
+  return requested ?? fallback;
+}
+
+function normalizeWorkspaceRelativePath(input: string | undefined): string | undefined {
+  if (!input) {
+    return undefined;
+  }
+  const normalized = input.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+  if (!normalized || normalized === ".") {
+    return undefined;
+  }
+  const safe = path.posix.normalize(normalized);
+  if (!safe || safe === "." || safe === ".." || safe.startsWith("../") || safe.includes("/../")) {
+    return undefined;
+  }
+  return safe;
+}
+
 function sanitizeFilename(input: string): string {
   return input.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/_+/g, "_");
 }
@@ -288,6 +331,110 @@ function isTextLikeMime(mime: string): boolean {
     base === "application/graphql" ||
     base === "application/sql"
   );
+}
+
+function isLikelyBinaryMime(mime: string): boolean {
+  const base = mime.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (!base) {
+    return false;
+  }
+  if (isTextLikeMime(base)) {
+    return false;
+  }
+  if (BINARY_MIME_EXACT.has(base)) {
+    return true;
+  }
+  return BINARY_MIME_PREFIXES.some((prefix) => base.startsWith(prefix));
+}
+
+async function sniffFileSample(filePath: string, maxBytes = 8192): Promise<Buffer> {
+  const handle = await fs.open(filePath, "r");
+  try {
+    const buf = Buffer.alloc(maxBytes);
+    const { bytesRead } = await handle.read(buf, 0, maxBytes, 0);
+    return buf.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+function isLikelyTextBuffer(sample: Buffer): boolean {
+  if (sample.length === 0) {
+    return true;
+  }
+  for (const byte of sample) {
+    if (byte === 0) {
+      return false;
+    }
+  }
+
+  let suspicious = 0;
+  for (const byte of sample) {
+    if (byte === 9 || byte === 10 || byte === 13) {
+      continue;
+    }
+    if (byte < 32 || byte === 127) {
+      suspicious += 1;
+    }
+  }
+
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(sample);
+    return suspicious / sample.length < 0.2;
+  } catch {
+    return suspicious / sample.length < 0.05;
+  }
+}
+
+async function detectFileDeliveryCapabilities(params: {
+  filePath: string;
+  mime: string;
+}): Promise<{ isBinary: boolean; previewSupported: boolean }> {
+  const ext = path.extname(params.filePath).toLowerCase();
+  const mimeBase = params.mime.split(";")[0]?.trim().toLowerCase() ?? "";
+  const likelyBinaryByMime = isLikelyBinaryMime(params.mime);
+  const sample = await sniffFileSample(params.filePath);
+  const textByContent = isLikelyTextBuffer(sample);
+
+  const isBinary = sample.length > 0 ? !textByContent : likelyBinaryByMime;
+  const imagePreviewByMime = mimeBase.startsWith("image/");
+  const imagePreviewByExt = [
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".ico",
+    ".heic",
+    ".svg",
+  ].includes(ext);
+  const mediaPreviewByMime = mimeBase.startsWith("audio/") || mimeBase.startsWith("video/");
+  const mediaPreviewByExt = [
+    ".mp3",
+    ".wav",
+    ".flac",
+    ".ogg",
+    ".m4a",
+    ".aac",
+    ".mp4",
+    ".mov",
+    ".webm",
+    ".m4v",
+  ].includes(ext);
+  const previewSupported =
+    (isBinary &&
+      (ext === ".pdf" ||
+        mimeBase === "application/pdf" ||
+        imagePreviewByMime ||
+        imagePreviewByExt ||
+        mediaPreviewByMime ||
+        mediaPreviewByExt)) ||
+    (!isBinary && (MARKDOWN_PREVIEW_EXTENSIONS.has(ext) || INLINE_TEXT_PREVIEW_EXTENSIONS.has(ext)));
+
+  return { isBinary, previewSupported };
 }
 
 function shouldRenderMarkdownPreview(filePath: string, presentation: FilePresentationMode): boolean {
@@ -409,6 +556,9 @@ async function walkFiles(dir: string, baseDir = dir): Promise<string[]> {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries) {
+    if (WINDOWS_METADATA_SUFFIX_RE.test(entry.name)) {
+      continue;
+    }
     const abs = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       files.push(...(await walkFiles(abs, baseDir)));
@@ -810,10 +960,17 @@ export class CfshareManager {
     countAsDownload?: boolean;
   }): Promise<void> {
     const stat = await fs.stat(params.filePath);
-    const presentation = params.presentation ?? "download";
     const detectedMime = String(mimeLookup(params.filePath) || "application/octet-stream");
+    const capabilities = await detectFileDeliveryCapabilities({
+      filePath: params.filePath,
+      mime: detectedMime,
+    });
+    let presentation = params.presentation ?? "download";
+    if (presentation === "preview" && !capabilities.previewSupported) {
+      presentation = "raw";
+    }
     const mime =
-      presentation === "raw" && isTextLikeMime(detectedMime)
+      presentation === "raw" && !capabilities.isBinary
         ? "text/plain; charset=utf-8"
         : detectedMime;
     const method = (params.req.method ?? "GET").toUpperCase();
@@ -935,12 +1092,57 @@ export class CfshareManager {
     return { zipPath, size: stat.size };
   }
 
+  private async createFolderZipArchive(params: {
+    workspaceDir: string;
+    folderPath: string;
+  }): Promise<{ zipPath: string; size: number; downloadName: string }> {
+    const safeFolderPath = normalizeWorkspaceRelativePath(params.folderPath);
+    if (!safeFolderPath) {
+      throw new Error("invalid_folder_path");
+    }
+    const folderAbs = path.join(params.workspaceDir, safeFolderPath);
+    if (!isSubPath(folderAbs, params.workspaceDir) || !(await fileExists(folderAbs))) {
+      throw new Error("folder_not_found");
+    }
+    const stat = await fs.stat(folderAbs);
+    if (!stat.isDirectory()) {
+      throw new Error("not_a_directory");
+    }
+
+    const zipName = `${sanitizeFilename(path.basename(folderAbs) || "folder")}.zip`;
+    const tempZipName = `.cfshare_folder_${randomId("zip")}.zip`;
+    const zipPath = path.join(params.workspaceDir, tempZipName);
+    const files = await walkFiles(folderAbs);
+
+    await new Promise<void>((resolve, reject) => {
+      const zip = new yazl.ZipFile();
+      const out = createWriteStream(zipPath);
+      out.once("error", reject);
+      out.once("close", () => resolve());
+      zip.outputStream.pipe(out);
+
+      for (const relPath of files) {
+        const zipEntry = path.posix.join(path.basename(folderAbs), relPath.split(path.sep).join("/"));
+        zip.addFile(path.join(folderAbs, relPath), zipEntry);
+      }
+      zip.end();
+    });
+
+    const zipStat = await fs.stat(zipPath);
+    return {
+      zipPath,
+      size: zipStat.size,
+      downloadName: zipName,
+    };
+  }
+
   private async startFileServer(params: {
     session: ExposureSession;
     workspaceDir: string;
     mode: "normal" | "zip";
     presentation: FilePresentationMode;
     maxDownloads?: number;
+    directSingleFileRoot: boolean;
   }): Promise<FileServerHandle> {
     const port = await findFreePort();
 
@@ -952,12 +1154,19 @@ export class CfshareManager {
       }
       const abs = path.join(params.workspaceDir, relPath);
       const stat = await fs.stat(abs);
+      const detectedMime = String(mimeLookup(abs) || "application/octet-stream");
+      const capabilities = await detectFileDeliveryCapabilities({
+        filePath: abs,
+        mime: detectedMime,
+      });
       manifest.push({
         name: relPath,
         size: stat.size,
         sha256: await sha256File(abs),
         relative_url: `/${formatRelativeUrl(relPath)}`,
         modified_at: toLocalIso(stat.mtime),
+        is_binary: capabilities.isBinary,
+        preview_supported: capabilities.previewSupported,
       });
     }
 
@@ -965,18 +1174,17 @@ export class CfshareManager {
     if (params.mode === "zip") {
       zipBundle = await this.createZipArchive(params.workspaceDir);
       manifest.push({
-        name: path.basename(zipBundle.zipPath),
+        name: "download.zip",
         size: zipBundle.size,
         sha256: await sha256File(zipBundle.zipPath),
-        relative_url: "/download.zip",
+        relative_url: "/__cfshare__/download.zip",
         modified_at: nowIso(),
+        is_binary: true,
+        preview_supported: false,
       });
     }
 
-    const explorerManifest =
-      params.mode === "zip"
-        ? manifest.filter((entry) => entry.relative_url === "/download.zip")
-        : manifest;
+    const explorerManifest = manifest;
 
     const allowRequest = this.buildRateLimiter(this.policy.rateLimit);
 
@@ -993,6 +1201,7 @@ export class CfshareManager {
 
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       const pathname = decodeURIComponent(url.pathname);
+      const requestedPresentation = resolveRequestPresentation(url, params.presentation);
 
       const checkMaxDownloads = async () => {
         if (typeof params.maxDownloads !== "number") {
@@ -1005,18 +1214,14 @@ export class CfshareManager {
 
       try {
         if (pathname === "/") {
-          if (
-            params.mode === "normal" &&
-            params.presentation === "preview" &&
-            explorerManifest.length === 1
-          ) {
+          if (params.mode === "normal" && params.directSingleFileRoot && explorerManifest.length === 1) {
             const filePath = path.join(params.workspaceDir, explorerManifest[0].name);
             await this.sendFileResponse({
               req,
               res,
               session: params.session,
               filePath,
-              presentation: params.presentation,
+              presentation: requestedPresentation,
               countAsDownload: true,
             });
             await checkMaxDownloads();
@@ -1047,18 +1252,50 @@ export class CfshareManager {
           return;
         }
 
-        if (params.mode === "zip") {
-          if (pathname !== "/download.zip" || !zipBundle) {
-            res.writeHead(404, { "content-type": "application/json" });
-            res.end(JSON.stringify({ error: "not_found" }));
+        if (pathname === "/__cfshare__/download-folder.zip") {
+          const folderPath = normalizeWorkspaceRelativePath(ensureString(url.searchParams.get("path")));
+          if (!folderPath) {
+            res.writeHead(400, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: "invalid_folder_path" }));
             return;
           }
+          let bundle: { zipPath: string; size: number; downloadName: string };
+          try {
+            bundle = await this.createFolderZipArchive({
+              workspaceDir: params.workspaceDir,
+              folderPath,
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const status = message === "folder_not_found" ? 404 : 400;
+            res.writeHead(status, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: message }));
+            return;
+          }
+          try {
+            await this.sendFileResponse({
+              req,
+              res,
+              session: params.session,
+              filePath: bundle.zipPath,
+              downloadName: bundle.downloadName,
+              presentation: "download",
+              countAsDownload: true,
+            });
+          } finally {
+            await fs.unlink(bundle.zipPath).catch(() => undefined);
+          }
+          await checkMaxDownloads();
+          return;
+        }
+
+        if (pathname === "/__cfshare__/download.zip" && params.mode === "zip" && zipBundle) {
           await this.sendFileResponse({
             req,
             res,
             session: params.session,
             filePath: zipBundle.zipPath,
-            presentation: params.presentation,
+            presentation: "download",
             countAsDownload: true,
           });
           await checkMaxDownloads();
@@ -1085,7 +1322,7 @@ export class CfshareManager {
           res,
           session: params.session,
           filePath: target,
-          presentation: params.presentation,
+          presentation: requestedPresentation,
           countAsDownload: true,
         });
         await checkMaxDownloads();
@@ -1637,6 +1874,8 @@ export class CfshareManager {
     const workspaceDir = path.join(this.workspaceRoot, id);
     await mkdirp(workspaceDir);
     const inputSummary = await this.summarizeExposeInputs(params.paths);
+    const directSingleFileRoot =
+      mode === "normal" && inputSummary.length === 1 && inputSummary[0]?.type === "file";
 
     const session: ExposureSession = {
       id,
@@ -1670,6 +1909,7 @@ export class CfshareManager {
         mode,
         presentation,
         maxDownloads: session.maxDownloads,
+        directSingleFileRoot,
       });
 
       session.originServer = fileServer.server;

@@ -5,6 +5,7 @@ export type AccessMode = "token" | "basic" | "none";
 export type ExposureType = "port" | "files";
 export type ExposureStatus = "starting" | "running" | "stopped" | "error" | "expired";
 export type LogComponent = "tunnel" | "origin" | "manager";
+export type FilePresentationMode = "download" | "preview" | "raw";
 
 export type RateLimitPolicy = {
   enabled: boolean;
@@ -75,6 +76,8 @@ export type ExposureSession = {
   sourcePort?: number;
   workspaceDir?: string;
   manifest?: ManifestEntry[];
+  fileMode?: "single" | "index" | "zip";
+  filePresentation?: FilePresentationMode;
   maxDownloads?: number;
   process?: ChildProcessWithoutNullStreams;
   originServer?: Server;

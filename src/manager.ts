@@ -21,6 +21,7 @@ import type {
   CfsharePolicy,
   ExposureRecord,
   ExposureSession,
+  FilePresentationMode,
   ManifestEntry,
   RateLimitPolicy,
 } from "./types.js";
@@ -144,6 +145,13 @@ function normalizeTtl(value: unknown, policy: CfsharePolicy): number {
   return Math.max(60, Math.min(policy.maxTtlSeconds, n));
 }
 
+function normalizeFilePresentation(value: unknown): FilePresentationMode {
+  if (value === "preview" || value === "raw" || value === "download") {
+    return value;
+  }
+  return "download";
+}
+
 function sanitizeFilename(input: string): string {
   return input.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/_+/g, "_");
 }
@@ -154,6 +162,45 @@ function ensureString(input: unknown): string | undefined {
   }
   const trimmed = input.trim();
   return trimmed || undefined;
+}
+
+function buildContentDisposition(params: {
+  mode: FilePresentationMode;
+  filePath: string;
+  downloadName?: string;
+}): string | undefined {
+  if (params.mode === "raw") {
+    return undefined;
+  }
+  const verb = params.mode === "preview" ? "inline" : "attachment";
+  const filename = params.downloadName ?? path.basename(params.filePath);
+  return `${verb}; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
+function isTextLikeMime(mime: string): boolean {
+  const base = mime.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (!base) {
+    return false;
+  }
+  if (base.startsWith("text/")) {
+    return true;
+  }
+  if (base.endsWith("+json") || base.endsWith("+xml")) {
+    return true;
+  }
+  return (
+    base === "application/json" ||
+    base === "application/xml" ||
+    base === "application/javascript" ||
+    base === "application/x-javascript" ||
+    base === "application/typescript" ||
+    base === "application/x-typescript" ||
+    base === "application/yaml" ||
+    base === "application/x-yaml" ||
+    base === "application/toml" ||
+    base === "application/graphql" ||
+    base === "application/sql"
+  );
 }
 
 function resolveBinPath(bin: string): string | undefined {
@@ -596,10 +643,16 @@ export class CfshareManager {
     session: ExposureSession;
     filePath: string;
     downloadName?: string;
+    presentation?: FilePresentationMode;
     countAsDownload?: boolean;
   }): Promise<void> {
     const stat = await fs.stat(params.filePath);
-    const mime = mimeLookup(params.filePath) || "application/octet-stream";
+    const presentation = params.presentation ?? "download";
+    const detectedMime = String(mimeLookup(params.filePath) || "application/octet-stream");
+    const mime =
+      presentation === "raw" && isTextLikeMime(detectedMime)
+        ? "text/plain; charset=utf-8"
+        : detectedMime;
     const method = (params.req.method ?? "GET").toUpperCase();
 
     if (method !== "GET" && method !== "HEAD") {
@@ -611,10 +664,17 @@ export class CfshareManager {
     const headers: Record<string, string> = {
       "content-type": String(mime),
       "accept-ranges": "bytes",
-      "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(
-        params.downloadName ?? path.basename(params.filePath),
-      )}`,
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
     };
+    const contentDisposition = buildContentDisposition({
+      mode: presentation,
+      filePath: params.filePath,
+      downloadName: params.downloadName,
+    });
+    if (contentDisposition) {
+      headers["content-disposition"] = contentDisposition;
+    }
 
     const range = ensureString(params.req.headers.range);
     if (!range) {
@@ -690,6 +750,7 @@ export class CfshareManager {
     session: ExposureSession;
     workspaceDir: string;
     mode: "single" | "index" | "zip";
+    presentation: FilePresentationMode;
     maxDownloads?: number;
   }): Promise<FileServerHandle> {
     const port = await findFreePort();
@@ -760,6 +821,7 @@ export class CfshareManager {
             res,
             session: params.session,
             filePath,
+            presentation: params.presentation,
             countAsDownload: true,
           });
           await checkMaxDownloads();
@@ -782,6 +844,7 @@ export class CfshareManager {
             res,
             session: params.session,
             filePath: zipBundle.zipPath,
+            presentation: params.presentation,
             countAsDownload: true,
           });
           await checkMaxDownloads();
@@ -817,6 +880,7 @@ export class CfshareManager {
           res,
           session: params.session,
           filePath: target,
+          presentation: params.presentation,
           countAsDownload: true,
         });
         await checkMaxDownloads();
@@ -1210,6 +1274,7 @@ export class CfshareManager {
       paths: string[];
       opts?: {
         mode?: "single" | "index" | "zip";
+        presentation?: FilePresentationMode;
         ttl_seconds?: number;
         access?: AccessMode;
         max_downloads?: number;
@@ -1226,6 +1291,7 @@ export class CfshareManager {
     const ttlSeconds = normalizeTtl(params.opts?.ttl_seconds, this.policy);
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
     const mode = params.opts?.mode ?? "index";
+    const presentation = normalizeFilePresentation(params.opts?.presentation);
     const accessMode = normalizeAccessMode(params.opts?.access, this.policy.defaultExposeFilesAccess);
     const protectOrigin = accessMode !== "none";
 
@@ -1243,6 +1309,8 @@ export class CfshareManager {
       originPort: 0,
       tunnelPort: 0,
       workspaceDir,
+      fileMode: mode,
+      filePresentation: presentation,
       logs: [],
       stats: { requests: 0, downloads: 0, bytesSent: 0 },
       access: this.makeAccessState({
@@ -1261,6 +1329,7 @@ export class CfshareManager {
         session,
         workspaceDir,
         mode,
+        presentation,
         maxDownloads: session.maxDownloads,
       });
 
@@ -1314,6 +1383,7 @@ export class CfshareManager {
           expires_at: session.expiresAt,
           files_count: session.manifest?.length ?? 0,
           mode,
+          presentation,
         },
       });
 
@@ -1321,6 +1391,8 @@ export class CfshareManager {
         id: session.id,
         public_url: session.publicUrl,
         expires_at: session.expiresAt,
+        mode,
+        presentation,
         manifest: session.manifest,
       };
     } catch (error) {
@@ -1404,6 +1476,14 @@ export class CfshareManager {
       }
     }
 
+    const fileSharing =
+      session.type === "files"
+        ? {
+            mode: session.fileMode ?? "index",
+            presentation: session.filePresentation ?? "download",
+          }
+        : undefined;
+
     return {
       id: session.id,
       status: {
@@ -1417,6 +1497,7 @@ export class CfshareManager {
       local_url: session.localUrl,
       stats: session.stats,
       usage_snippets: usageSnippets,
+      file_sharing: fileSharing,
       last_error: session.lastError,
       manifest: session.manifest,
     };

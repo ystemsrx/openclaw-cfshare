@@ -58,7 +58,16 @@ function registerToolsForContext(api: OpenClawPluginApi, ctx: ToolContext) {
       parameters: ExposeFilesSchema,
       async execute(
         _toolCallId: string,
-        params: { paths: string[]; opts?: Record<string, unknown> },
+        params: {
+          paths: string[];
+          opts?: {
+            mode?: "single" | "index" | "zip";
+            presentation?: "download" | "preview" | "raw";
+            ttl_seconds?: number;
+            access?: "token" | "basic" | "none";
+            max_downloads?: number;
+          };
+        },
       ) {
         return jsonResult(await manager.exposeFiles(params, ctx));
       },

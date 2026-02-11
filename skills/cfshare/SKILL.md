@@ -28,7 +28,7 @@ Use CFShare tools to create short-lived public links with safer defaults.
 
 - `env_check`: validate cloudflared/path/version and effective defaults.
 - `expose_port`: share `localhost:<port>` with optional token/basic auth.
-- `expose_files`: copy files into temporary workspace, start read-only server, expose it.
+- `expose_files`: copy files into temporary workspace, start read-only server, expose it. Use `opts.presentation` to control file delivery style: `download` (default), `preview`, or `raw`.
 - `exposure_list`: list sessions.
 - `exposure_get`: full status + usage snippets.
 - `exposure_stop`: stop one or all sessions and cleanup.

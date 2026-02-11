@@ -9,6 +9,10 @@ const FileMode = stringEnum(["single", "index", "zip"] as const, {
   description: "File exposure mode",
 });
 
+const FilePresentationMode = stringEnum(["download", "preview", "raw"] as const, {
+  description: "How files should be served to clients",
+});
+
 const ComponentMode = stringEnum(["tunnel", "origin", "all"] as const, {
   description: "Log component",
 });
@@ -30,6 +34,7 @@ const PortOptsSchema = Type.Object(
 const FilesOptsSchema = Type.Object(
   {
     mode: Type.Optional(FileMode),
+    presentation: Type.Optional(FilePresentationMode),
     ttl_seconds: Type.Optional(Type.Number({ minimum: 60, maximum: 604800 })),
     access: Type.Optional(AccessMode),
     max_downloads: Type.Optional(Type.Number({ minimum: 1, maximum: 1_000_000 })),

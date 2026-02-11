@@ -40,8 +40,8 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
   <body>
     <div class="flex h-screen w-full bg-gray-50 text-slate-800 font-sans overflow-hidden select-none">
       <main class="flex-1 flex flex-col h-full overflow-hidden relative">
-        <header class="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-6 shrink-0">
-          <div id="breadcrumb" class="flex items-center gap-1 overflow-hidden flex-1 mr-4"></div>
+        <header class="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-4 md:px-6 shrink-0">
+          <div id="breadcrumb" class="hidden md:flex items-center gap-1 overflow-hidden flex-1 mr-4"></div>
 
           <div class="flex items-center gap-3">
             <div class="relative">
@@ -72,6 +72,8 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
             </div>
           </div>
         </header>
+
+        <div id="mobile-breadcrumb" class="md:hidden bg-white border-b border-gray-200 px-3 py-2 overflow-x-auto whitespace-nowrap"></div>
 
         <div id="file-area" class="flex-1 overflow-y-auto p-6 scroll-smooth"></div>
 
@@ -412,9 +414,11 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
           panelFile: null,
           isPanelOpen: false,
           presentation: payload.presentation || "download",
+          suppressClicksUntil: 0,
         };
 
         const breadcrumbEl = document.getElementById("breadcrumb");
+        const mobileBreadcrumbEl = document.getElementById("mobile-breadcrumb");
         const fileAreaEl = document.getElementById("file-area");
         const panelEl = document.getElementById("details-panel");
         const searchInputEl = document.getElementById("search-input");
@@ -422,6 +426,8 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
         const viewListEl = document.getElementById("view-list");
 
         let panelTimer = null;
+        let panelCloseTimer = null;
+        const PANEL_ANIMATION_MS = 320;
 
         function closestFromEventTarget(target, selector) {
           if (!target) {
@@ -438,6 +444,42 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
 
         function getCurrentFolderId() {
           return state.currentPath[state.currentPath.length - 1].id;
+        }
+
+        function shouldSuppressClick() {
+          return Date.now() < state.suppressClicksUntil;
+        }
+
+        function suppressInteraction(durationMs) {
+          const until = Date.now() + Math.max(0, Number(durationMs) || 0);
+          if (until > state.suppressClicksUntil) {
+            state.suppressClicksUntil = until;
+          }
+        }
+
+        function applyMobilePanelOpenState(open) {
+          const backdrop = document.getElementById("panel-backdrop");
+          const modalCard = document.getElementById("panel-modal-card");
+          if (!backdrop || !modalCard) {
+            return false;
+          }
+          backdrop.classList.remove("opacity-0", "opacity-100");
+          backdrop.classList.add(open ? "opacity-100" : "opacity-0");
+
+          modalCard.classList.remove(
+            "-translate-y-[46%]",
+            "-translate-y-[50%]",
+            "opacity-0",
+            "opacity-100",
+            "scale-95",
+            "scale-100",
+          );
+          if (open) {
+            modalCard.classList.add("-translate-y-[50%]", "opacity-100", "scale-100");
+          } else {
+            modalCard.classList.add("-translate-y-[46%]", "opacity-0", "scale-95");
+          }
+          return true;
         }
 
         function getCurrentFiles() {
@@ -708,10 +750,18 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
           return null;
         }
 
+        function isMobileViewport() {
+          return window.matchMedia("(max-width: 768px)").matches;
+        }
+
         function setSelectedFile(itemId) {
           state.selectedFileId = itemId;
           const selected = itemId ? data.byId.get(itemId) || null : null;
           if (selected) {
+            if (panelCloseTimer) {
+              clearTimeout(panelCloseTimer);
+              panelCloseTimer = null;
+            }
             state.panelFile = selected;
           }
           if (panelTimer) {
@@ -719,14 +769,36 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
             panelTimer = null;
           }
           if (itemId) {
+            state.isPanelOpen = false;
+            renderPanel();
             panelTimer = setTimeout(function () {
               state.isPanelOpen = true;
+              if (isMobileViewport() && applyMobilePanelOpenState(true)) {
+                return;
+              }
               renderPanel();
             }, 200);
           } else {
             state.isPanelOpen = false;
+            const mobileClosingAnimated = isMobileViewport() && applyMobilePanelOpenState(false);
+            if (isMobileViewport()) {
+              suppressInteraction(PANEL_ANIMATION_MS + 520);
+            }
+            if (panelCloseTimer) {
+              clearTimeout(panelCloseTimer);
+            }
+            panelCloseTimer = setTimeout(function () {
+              panelCloseTimer = null;
+              if (state.selectedFileId || state.isPanelOpen) {
+                return;
+              }
+              state.panelFile = null;
+              renderPanel();
+            }, PANEL_ANIMATION_MS);
+            if (!mobileClosingAnimated) {
+              renderPanel();
+            }
           }
-          renderPanel();
           renderFileArea();
         }
 
@@ -793,6 +865,22 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
                 + "</button></div>";
             })
             .join("");
+          if (mobileBreadcrumbEl) {
+            mobileBreadcrumbEl.innerHTML = state.currentPath
+              .map(function (item, index) {
+                const isCurrent = index === state.currentPath.length - 1;
+                return '<button data-breadcrumb-index="'
+                  + String(index)
+                  + '" class="inline-flex items-center text-sm '
+                  + (isCurrent ? "font-semibold text-slate-900" : "text-slate-500")
+                  + '">'
+                  + (index > 0 ? '<span class="mx-1.5 text-slate-300">/</span>' : "")
+                  + '<span>'
+                  + escapeHtml(item.name)
+                  + "</span></button>";
+              })
+              .join("");
+          }
           if (window.lucide && window.lucide.createIcons) {
             window.lucide.createIcons();
           }
@@ -858,35 +946,37 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
             + "</button></td></tr>";
         }
 
-        function renderPanelActions(panelFile) {
+        function renderPanelActions(panelFile, mobileLayout) {
           if (panelFile.type === "folder") {
-            return '<button id="panel-folder-download" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
+            return '<button id="panel-folder-download" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2.5 rounded-xl font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
               + '<i data-lucide="download" style="width: 16px; height: 16px"></i>'
               + "打包下载"
               + "</button>";
           }
 
           if (isImageItem(panelFile)) {
-            return '<button id="panel-download" class="w-full bg-white hover:bg-gray-100 border border-gray-200 text-slate-700 py-2 rounded-lg font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
+            return '<button id="panel-download" class="w-full '
+              + (mobileLayout ? "bg-blue-600 hover:bg-blue-700 text-white" : "bg-white hover:bg-gray-100 border border-gray-200 text-slate-700")
+              + ' py-2.5 rounded-xl font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
               + '<i data-lucide="download" style="width: 16px; height: 16px"></i>'
               + "下载"
               + "</button>";
           }
 
           if (supportsPreview(panelFile) || !isBinaryItem(panelFile)) {
-            return '<div class="grid grid-cols-2 gap-2">'
-              + '<button id="panel-preview" class="bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
+            return '<div class="grid grid-cols-2 gap-2.5">'
+              + '<button id="panel-preview" class="bg-blue-600 hover:bg-blue-700 text-white py-2.5 rounded-xl font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
               + '<i data-lucide="eye" style="width: 16px; height: 16px"></i>'
               + "预览"
               + "</button>"
-              + '<button id="panel-download" class="bg-white hover:bg-gray-100 border border-gray-200 text-slate-700 py-2 rounded-lg font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
+              + '<button id="panel-download" class="bg-white hover:bg-gray-100 border border-gray-200 text-slate-700 py-2.5 rounded-xl font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
               + '<i data-lucide="download" style="width: 16px; height: 16px"></i>'
               + "下载"
               + "</button>"
               + "</div>";
           }
 
-          return '<button id="panel-download" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
+          return '<button id="panel-download" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2.5 rounded-xl font-medium transition-colors shadow-sm flex items-center justify-center gap-2">'
             + '<i data-lucide="download" style="width: 16px; height: 16px"></i>'
             + "下载文件"
             + "</button>";
@@ -945,61 +1035,148 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
           }
 
           const panelFile = state.panelFile;
+          const mobileLayout = isMobileViewport();
           if (!panelFile) {
-            panelEl.className = "absolute right-0 top-0 bottom-0 w-80 bg-white border-l border-gray-200 shadow-2xl z-30 flex flex-col transform transition-transform duration-300 ease-in-out translate-x-full";
+            panelEl.className = mobileLayout
+              ? "fixed inset-0 z-40 pointer-events-none"
+              : "absolute right-0 top-0 bottom-0 w-80 bg-white border-l border-gray-200 shadow-2xl z-30 flex flex-col transform transition-transform duration-300 ease-in-out translate-x-full";
             panelEl.innerHTML = "";
             return;
           }
 
-          panelEl.className = "absolute right-0 top-0 bottom-0 w-80 bg-white border-l border-gray-200 shadow-2xl z-30 flex flex-col transform transition-transform duration-300 ease-in-out " + (state.isPanelOpen ? "translate-x-0" : "translate-x-full");
+          if (mobileLayout) {
+            const previewUrl = getInlinePreviewUrl(panelFile);
+            const modalHeightClass = isImageItem(panelFile) ? "max-h-[86vh]" : "max-h-[68vh]";
+            panelEl.className = "fixed inset-0 z-40 pointer-events-auto";
+            panelEl.innerHTML = '<div id="panel-backdrop" class="absolute inset-0 bg-slate-900/45 transition-opacity duration-200 '
+              + (state.isPanelOpen ? "opacity-100" : "opacity-0")
+              + '"></div>'
+              + '<div id="panel-modal-card" class="absolute inset-x-3 top-1/2 rounded-2xl bg-white shadow-2xl border border-slate-200 flex flex-col overflow-hidden transform transition-all duration-300 '
+              + modalHeightClass
+              + " "
+              + "-translate-y-[46%] opacity-0 scale-95"
+              + '">'
+              + '<div class="p-4 border-b border-gray-100 flex items-center justify-between bg-white/95 backdrop-blur">'
+              + '<span class="font-semibold text-slate-800">详细信息</span>'
+              + '<button id="panel-close" class="text-gray-400 hover:text-gray-600 rounded-full p-1.5 hover:bg-gray-100">'
+              + '<i data-lucide="x" style="width: 18px; height: 18px"></i>'
+              + "</button></div>"
+              + (isImageItem(panelFile)
+                ? '<div class="w-full aspect-[16/9] bg-slate-200 overflow-hidden">'
+                  + (previewUrl
+                    ? '<img src="'
+                      + escapeHtml(previewUrl)
+                      + '" alt="'
+                      + escapeHtml(panelFile.name)
+                      + '" class="w-full h-full object-cover" loading="lazy" />'
+                    : '<div class="w-full h-full flex items-center justify-center text-gray-400"><i data-lucide="image" style="width: 28px; height: 28px"></i></div>')
+                  + "</div>"
+                : "")
+              + '<div class="p-5 space-y-4 flex-1 min-h-0 overflow-y-auto">'
+              + (!isImageItem(panelFile)
+                ? '<div class="flex items-center gap-3"><div class="w-14 h-14 bg-gray-50 rounded-xl flex items-center justify-center shadow-inner">'
+                  + renderIcon(panelFile.name, panelFile.type, 30)
+                  + '</div><div class="min-w-0"><h3 class="text-base font-bold text-slate-800 break-all">'
+                  + escapeHtml(panelFile.name)
+                  + '</h3><p class="text-xs text-gray-500 mt-1 uppercase">'
+                  + escapeHtml(panelFile.type === "file" ? "FILE" : String(panelFile.type).toUpperCase())
+                  + "</p></div></div>"
+                : '<div><h3 class="text-base font-bold text-slate-800 break-all">'
+                  + escapeHtml(panelFile.name)
+                  + '</h3><p class="text-xs text-gray-500 mt-1 uppercase">'
+                  + escapeHtml(panelFile.type === "file" ? "FILE" : String(panelFile.type).toUpperCase())
+                  + "</p></div>")
+              + '<div class="space-y-3 pt-1">'
+              + '<div class="flex items-start gap-3"><div class="mt-0.5 text-gray-400"><i data-lucide="hard-drive" style="width: 16px; height: 16px"></i></div><div><p class="text-xs font-medium text-gray-500">大小</p><p class="text-sm text-slate-700 font-medium">'
+              + escapeHtml(panelFile.size)
+              + "</p></div></div>"
+              + '<div class="flex items-start gap-3"><div class="mt-0.5 text-gray-400"><i data-lucide="clock" style="width: 16px; height: 16px"></i></div><div><p class="text-xs font-medium text-gray-500">修改时间</p><p class="text-sm text-slate-700 font-medium">'
+              + escapeHtml(panelFile.date)
+              + "</p></div></div>"
+              + '<div class="flex items-start gap-3"><div class="mt-0.5 text-gray-400"><i data-lucide="folder" style="width: 16px; height: 16px"></i></div><div><p class="text-xs font-medium text-gray-500">位置</p><p class="text-sm text-slate-700 font-medium">'
+              + escapeHtml(state.currentPath[state.currentPath.length - 1].name)
+              + "</p></div></div>"
+              + "</div></div>"
+              + '<div class="p-4 border-t border-gray-100 bg-white/95 backdrop-blur">'
+              + renderPanelActions(panelFile, true)
+              + "</div></div>";
+          } else {
+            panelEl.className = "absolute right-0 top-0 bottom-0 w-80 bg-white border-l border-gray-200 shadow-2xl z-30 flex flex-col transform transition-transform duration-300 ease-in-out " + (state.isPanelOpen ? "translate-x-0" : "translate-x-full");
 
-          panelEl.innerHTML = '<div class="p-4 border-b border-gray-100 flex items-center justify-between">'
-            + '<span class="font-semibold text-slate-700">详细信息</span>'
-            + '<button id="panel-close" class="text-gray-400 hover:text-gray-600 rounded-full p-1 hover:bg-gray-100">'
-            + '<i data-lucide="x" style="width: 18px; height: 18px"></i>'
-            + "</button></div>"
-            + '<div class="p-6 flex flex-col items-center border-b border-gray-100">'
-            + '<div class="w-24 h-24 bg-gray-50 rounded-2xl flex items-center justify-center mb-4 shadow-inner">'
-            + renderIcon(panelFile.name, panelFile.type, 48)
-            + "</div>"
-            + '<h3 class="text-lg font-bold text-slate-800 text-center break-all">'
-            + escapeHtml(panelFile.name)
-            + "</h3>"
-            + '<p class="text-sm text-gray-500 mt-1 uppercase">'
-            + escapeHtml(panelFile.type === "file" ? "FILE" : String(panelFile.type).toUpperCase())
-            + "</p></div>"
-            + '<div class="p-6 space-y-6 flex-1 min-h-0 overflow-y-auto">'
-            + '<div class="space-y-4">'
-            + '<div class="flex items-start gap-3"><div class="mt-0.5 text-gray-400"><i data-lucide="hard-drive" style="width: 16px; height: 16px"></i></div><div><p class="text-xs font-medium text-gray-500">大小</p><p class="text-sm text-slate-700 font-medium">'
-            + escapeHtml(panelFile.size)
-            + "</p></div></div>"
-            + '<div class="flex items-start gap-3"><div class="mt-0.5 text-gray-400"><i data-lucide="clock" style="width: 16px; height: 16px"></i></div><div><p class="text-xs font-medium text-gray-500">修改时间</p><p class="text-sm text-slate-700 font-medium">'
-            + escapeHtml(panelFile.date)
-            + "</p></div></div>"
-            + '<div class="flex items-start gap-3"><div class="mt-0.5 text-gray-400"><i data-lucide="folder" style="width: 16px; height: 16px"></i></div><div><p class="text-xs font-medium text-gray-500">位置</p><p class="text-sm text-slate-700 font-medium">'
-            + escapeHtml(state.currentPath[state.currentPath.length - 1].name)
-            + "</p></div></div>"
-            + "</div>"
-            + (isImageItem(panelFile)
-              ? '<div class="bg-gray-50 rounded-lg p-3"><p class="text-xs font-semibold text-gray-400 mb-2">预览</p><div class="w-full max-h-72 overflow-auto bg-gray-200 rounded flex items-center justify-center">'
-                + (getInlinePreviewUrl(panelFile)
-                  ? '<img src="'
-                    + escapeHtml(getInlinePreviewUrl(panelFile) || "")
-                    + '" alt="'
-                    + escapeHtml(panelFile.name)
-                    + '" class="max-w-full max-h-72 object-contain" loading="lazy" />'
-                  : '<i data-lucide="image" style="width: 24px; height: 24px"></i>')
-                + "</div></div>"
-              : "")
-            + "</div>"
-            + '<div class="p-4 border-t border-gray-100 bg-gray-50">'
-            + renderPanelActions(panelFile)
-            + "</div>";
+            panelEl.innerHTML = '<div class="p-4 border-b border-gray-100 flex items-center justify-between">'
+              + '<span class="font-semibold text-slate-700">详细信息</span>'
+              + '<button id="panel-close" class="text-gray-400 hover:text-gray-600 rounded-full p-1 hover:bg-gray-100">'
+              + '<i data-lucide="x" style="width: 18px; height: 18px"></i>'
+              + "</button></div>"
+              + '<div class="p-6 flex flex-col items-center border-b border-gray-100">'
+              + '<div class="w-24 h-24 bg-gray-50 rounded-2xl flex items-center justify-center mb-4 shadow-inner">'
+              + renderIcon(panelFile.name, panelFile.type, 48)
+              + "</div>"
+              + '<h3 class="text-lg font-bold text-slate-800 text-center break-all">'
+              + escapeHtml(panelFile.name)
+              + "</h3>"
+              + '<p class="text-sm text-gray-500 mt-1 uppercase">'
+              + escapeHtml(panelFile.type === "file" ? "FILE" : String(panelFile.type).toUpperCase())
+              + "</p></div>"
+              + '<div class="p-6 space-y-6 flex-1 min-h-0 overflow-y-auto">'
+              + '<div class="space-y-4">'
+              + '<div class="flex items-start gap-3"><div class="mt-0.5 text-gray-400"><i data-lucide="hard-drive" style="width: 16px; height: 16px"></i></div><div><p class="text-xs font-medium text-gray-500">大小</p><p class="text-sm text-slate-700 font-medium">'
+              + escapeHtml(panelFile.size)
+              + "</p></div></div>"
+              + '<div class="flex items-start gap-3"><div class="mt-0.5 text-gray-400"><i data-lucide="clock" style="width: 16px; height: 16px"></i></div><div><p class="text-xs font-medium text-gray-500">修改时间</p><p class="text-sm text-slate-700 font-medium">'
+              + escapeHtml(panelFile.date)
+              + "</p></div></div>"
+              + '<div class="flex items-start gap-3"><div class="mt-0.5 text-gray-400"><i data-lucide="folder" style="width: 16px; height: 16px"></i></div><div><p class="text-xs font-medium text-gray-500">位置</p><p class="text-sm text-slate-700 font-medium">'
+              + escapeHtml(state.currentPath[state.currentPath.length - 1].name)
+              + "</p></div></div>"
+              + "</div>"
+              + (isImageItem(panelFile)
+                ? '<div class="bg-gray-50 rounded-lg p-3"><p class="text-xs font-semibold text-gray-400 mb-2">预览</p><div class="w-full max-h-72 overflow-auto bg-gray-200 rounded flex items-center justify-center">'
+                  + (getInlinePreviewUrl(panelFile)
+                    ? '<img src="'
+                      + escapeHtml(getInlinePreviewUrl(panelFile) || "")
+                      + '" alt="'
+                      + escapeHtml(panelFile.name)
+                      + '" class="max-w-full max-h-72 object-contain" loading="lazy" />'
+                    : '<i data-lucide="image" style="width: 24px; height: 24px"></i>')
+                  + "</div></div>"
+                : "")
+              + "</div>"
+              + '<div class="p-4 border-t border-gray-100 bg-gray-50">'
+              + renderPanelActions(panelFile, false)
+              + "</div>";
+          }
 
           const closeButton = document.getElementById("panel-close");
           if (closeButton) {
-            closeButton.addEventListener("click", function () {
+            closeButton.addEventListener("click", function (event) {
+              event.preventDefault();
+              event.stopPropagation();
+              suppressInteraction(PANEL_ANIMATION_MS + 520);
               setSelectedFile(null);
+            });
+          }
+
+          const backdrop = document.getElementById("panel-backdrop");
+          if (backdrop) {
+            backdrop.addEventListener("click", function (event) {
+              event.preventDefault();
+              event.stopPropagation();
+              suppressInteraction(PANEL_ANIMATION_MS + 520);
+              setSelectedFile(null);
+            });
+          }
+
+          const modalCard = document.getElementById("panel-modal-card");
+          if (modalCard) {
+            modalCard.addEventListener("click", function (event) {
+              event.stopPropagation();
+            });
+          }
+
+          if (mobileLayout && state.isPanelOpen) {
+            requestAnimationFrame(function () {
+              applyMobilePanelOpenState(true);
             });
           }
 
@@ -1052,6 +1229,20 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
           });
         }
 
+        if (mobileBreadcrumbEl) {
+          mobileBreadcrumbEl.addEventListener("click", function (event) {
+            const target = closestFromEventTarget(event.target, "[data-breadcrumb-index]");
+            if (!target) {
+              return;
+            }
+            const index = Number.parseInt(target.getAttribute("data-breadcrumb-index") || "", 10);
+            if (!Number.isFinite(index) || index < 0) {
+              return;
+            }
+            onBreadcrumbClick(index);
+          });
+        }
+
         if (searchInputEl) {
           searchInputEl.addEventListener("input", function () {
             state.searchQuery = searchInputEl.value || "";
@@ -1084,6 +1275,11 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
 
         if (fileAreaEl) {
           fileAreaEl.addEventListener("click", function (event) {
+            if (shouldSuppressClick()) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
             const downloadButton = closestFromEventTarget(event.target, "[data-download-id]");
             if (downloadButton) {
               event.stopPropagation();
@@ -1113,6 +1309,24 @@ export function renderFileExplorerTemplate(params: RenderFileExplorerTemplatePar
             setSelectedFile(null);
           });
         }
+
+        const suppressGlobalEvent = function (event) {
+          if (!shouldSuppressClick()) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+        };
+        document.addEventListener("pointerdown", suppressGlobalEvent, true);
+        document.addEventListener("pointerup", suppressGlobalEvent, true);
+        document.addEventListener("touchend", suppressGlobalEvent, true);
+        document.addEventListener("click", suppressGlobalEvent, true);
+
+        window.addEventListener("resize", function () {
+          if (state.panelFile) {
+            renderPanel();
+          }
+        });
 
         renderBreadcrumb();
         renderFileArea();

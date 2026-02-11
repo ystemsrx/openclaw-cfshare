@@ -61,6 +61,7 @@ export type ManifestEntry = {
   size: number;
   sha256: string;
   relative_url: string;
+  modified_at?: string;
 };
 
 export type ExposureSession = {

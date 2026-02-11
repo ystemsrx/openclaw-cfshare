@@ -42,3 +42,4 @@ Use CFShare tools to create short-lived public links with safer defaults.
 - Always show `public_url` and `expires_at` after exposure creation.
 - Warn when access mode is `none`.
 - Include `exposure_stop` guidance after successful sharing.
+- When explaining time to users, use natural readable format (for example `yyyy-mm-dd hh:mm:ss`) instead of raw machine ISO strings.

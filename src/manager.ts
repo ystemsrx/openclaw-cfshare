@@ -12,7 +12,8 @@ import ignore from "ignore";
 import { lookup as mimeLookup } from "mime-types";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import yazl from "yazl";
-import { renderMarkdownPreviewTemplate } from "./markdownPreviewTemplate.js";
+import { renderFileExplorerTemplate } from "./templates/fileExplorerTemplate.js";
+import { renderMarkdownPreviewTemplate } from "./templates/markdownPreviewTemplate.js";
 import { loadPolicy } from "./policy.js";
 import type {
   AccessMode,
@@ -30,9 +31,15 @@ import type {
 } from "./types.js";
 
 const MAX_LOG_LINES = 4000;
+const MAX_RESPONSE_MANIFEST_ITEMS = 200;
+const MAX_RESPONSE_MANIFEST_ITEMS_MULTI_GET = 20;
+const MAX_EXPOSURE_GET_ITEMS = 200;
+const MAX_EXPOSURE_LOG_ITEMS = 100;
+const MAX_EXPOSURE_LOG_LINES_RESPONSE = 1000;
 const DEFAULT_PROBE_TIMEOUT_MS = 3000;
-const CLOUDFLARE_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com\b/i;
+const CLOUDFLARE_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com\b/gi;
 const MARKDOWN_PREVIEW_EXTENSIONS = new Set([".md", ".rmd", ".qmd"]);
+const INVALID_QUICK_TUNNEL_SUBDOMAINS = new Set(["api"]);
 
 type RateLimitState = {
   windowStart: number;
@@ -103,6 +110,20 @@ type ExposureLogsOpts = {
   lines?: number;
   since_seconds?: number;
   component?: "tunnel" | "origin" | "all";
+};
+
+type ExposeInputSummary = {
+  input_path: string;
+  name: string;
+  type: "file" | "directory";
+  size?: number;
+};
+
+type ManifestResponseMeta = {
+  total_count: number;
+  returned_count: number;
+  truncated: boolean;
+  total_size_bytes: number;
 };
 
 function nowIso(): string {
@@ -447,6 +468,42 @@ function shouldAllowPath(pathname: string, allowlist: string[]): boolean {
     }
     return pathname.startsWith(`${prefix.endsWith("/") ? prefix : `${prefix}/`}`);
   });
+}
+
+function isValidQuickTunnelUrl(input: string): boolean {
+  try {
+    const parsed = new URL(input);
+    if (parsed.protocol !== "https:") {
+      return false;
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (!host.endsWith(".trycloudflare.com")) {
+      return false;
+    }
+    const subdomain = host.slice(0, -".trycloudflare.com".length);
+    if (!subdomain || subdomain.includes(".")) {
+      return false;
+    }
+    if (INVALID_QUICK_TUNNEL_SUBDOMAINS.has(subdomain)) {
+      return false;
+    }
+    return /^[a-z0-9-]+$/i.test(subdomain);
+  } catch {
+    return false;
+  }
+}
+
+function pickQuickTunnelUrlFromLine(line: string): string | undefined {
+  const matches = line.match(CLOUDFLARE_URL_RE);
+  if (!matches) {
+    return undefined;
+  }
+  for (const candidate of matches) {
+    if (isValidQuickTunnelUrl(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
 }
 
 function matchAuditFilters(
@@ -900,6 +957,7 @@ export class CfshareManager {
         size: stat.size,
         sha256: await sha256File(abs),
         relative_url: `/${formatRelativeUrl(relPath)}`,
+        modified_at: toLocalIso(stat.mtime),
       });
     }
 
@@ -911,8 +969,14 @@ export class CfshareManager {
         size: zipBundle.size,
         sha256: await sha256File(zipBundle.zipPath),
         relative_url: "/download.zip",
+        modified_at: nowIso(),
       });
     }
+
+    const explorerManifest =
+      params.mode === "zip"
+        ? manifest.filter((entry) => entry.relative_url === "/download.zip")
+        : manifest;
 
     const allowRequest = this.buildRateLimiter(this.policy.rateLimit);
 
@@ -940,12 +1004,50 @@ export class CfshareManager {
       };
 
       try {
-        if (params.mode === "zip") {
-          if (pathname === "/") {
-            res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-            res.end(`<html><body><a href="/download.zip">download.zip</a></body></html>`);
+        if (pathname === "/") {
+          if (
+            params.mode === "normal" &&
+            params.presentation === "preview" &&
+            explorerManifest.length === 1
+          ) {
+            const filePath = path.join(params.workspaceDir, explorerManifest[0].name);
+            await this.sendFileResponse({
+              req,
+              res,
+              session: params.session,
+              filePath,
+              presentation: params.presentation,
+              countAsDownload: true,
+            });
+            await checkMaxDownloads();
             return;
           }
+
+          const body = Buffer.from(
+            renderFileExplorerTemplate({
+              title: "cfshare",
+              mode: params.mode,
+              presentation: params.presentation,
+              manifest: explorerManifest,
+            }),
+            "utf8",
+          );
+          res.writeHead(200, {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store",
+            "x-content-type-options": "nosniff",
+            "content-length": String(body.length),
+          });
+          if ((req.method ?? "GET").toUpperCase() === "HEAD") {
+            res.end();
+            return;
+          }
+          params.session.stats.bytesSent += body.length;
+          res.end(body);
+          return;
+        }
+
+        if (params.mode === "zip") {
           if (pathname !== "/download.zip" || !zipBundle) {
             res.writeHead(404, { "content-type": "application/json" });
             res.end(JSON.stringify({ error: "not_found" }));
@@ -960,28 +1062,6 @@ export class CfshareManager {
             countAsDownload: true,
           });
           await checkMaxDownloads();
-          return;
-        }
-
-        if (pathname === "/") {
-          if (manifest.length === 1) {
-            const filePath = path.join(params.workspaceDir, manifest[0].name);
-            await this.sendFileResponse({
-              req,
-              res,
-              session: params.session,
-              filePath,
-              presentation: params.presentation,
-              countAsDownload: true,
-            });
-            await checkMaxDownloads();
-            return;
-          }
-          const list = manifest
-            .map((entry) => `<li><a href="${entry.relative_url}">${entry.name}</a> (${entry.size} bytes)</li>`)
-            .join("\n");
-          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-          res.end(`<html><body><h1>cfshare</h1><ul>${list}</ul></body></html>`);
           return;
         }
 
@@ -1084,6 +1164,90 @@ export class CfshareManager {
     };
   }
 
+  private async summarizeExposeInputs(pathsInput: string[]): Promise<ExposeInputSummary[]> {
+    const out: ExposeInputSummary[] = [];
+    for (const rawPath of pathsInput) {
+      const resolved = path.resolve(rawPath);
+      const real = await fs.realpath(resolved).catch(() => resolved);
+      const stat = await fs.stat(real);
+      if (stat.isDirectory()) {
+        out.push({
+          input_path: rawPath,
+          name: path.basename(real) || rawPath,
+          type: "directory",
+        });
+        continue;
+      }
+      if (stat.isFile()) {
+        out.push({
+          input_path: rawPath,
+          name: path.basename(real) || rawPath,
+          type: "file",
+          size: stat.size,
+        });
+      }
+    }
+    return out;
+  }
+
+  private buildExposeFilesResponseManifest(params: {
+    inputs: ExposeInputSummary[];
+    fullManifest: ManifestEntry[];
+    detailedLimit?: number;
+  }): {
+    manifest: Array<ManifestEntry | ExposeInputSummary>;
+    manifest_mode: "detailed" | "summary";
+    manifest_meta: ManifestResponseMeta;
+  } {
+    const allFiles = params.inputs.length > 0 && params.inputs.every((entry) => entry.type === "file");
+    const shouldReturnDetailed = allFiles && params.inputs.length > 1;
+    const totalSizeBytes = params.fullManifest.reduce((sum, entry) => sum + entry.size, 0);
+
+    if (shouldReturnDetailed) {
+      const limit = Math.max(1, Math.trunc(params.detailedLimit ?? MAX_RESPONSE_MANIFEST_ITEMS));
+      const manifest = params.fullManifest.slice(0, limit);
+      return {
+        manifest,
+        manifest_mode: "detailed",
+        manifest_meta: {
+          total_count: params.fullManifest.length,
+          returned_count: manifest.length,
+          truncated: params.fullManifest.length > manifest.length,
+          total_size_bytes: totalSizeBytes,
+        },
+      };
+    }
+    return {
+      manifest: params.inputs,
+      manifest_mode: "summary",
+      manifest_meta: {
+        total_count: params.inputs.length,
+        returned_count: params.inputs.length,
+        truncated: false,
+        total_size_bytes: totalSizeBytes,
+      },
+    };
+  }
+
+  private makeManifestResponse(
+    manifest: ManifestEntry[] | undefined,
+    limit = MAX_RESPONSE_MANIFEST_ITEMS,
+  ): { manifest: ManifestEntry[]; manifest_meta: ManifestResponseMeta } {
+    const source = manifest ?? [];
+    const safeLimit = Math.max(1, Math.trunc(limit));
+    const sliced = source.slice(0, safeLimit);
+    const totalSizeBytes = source.reduce((sum, entry) => sum + entry.size, 0);
+    return {
+      manifest: sliced,
+      manifest_meta: {
+        total_count: source.length,
+        returned_count: sliced.length,
+        truncated: source.length > sliced.length,
+        total_size_bytes: totalSizeBytes,
+      },
+    };
+  }
+
   private startGuard() {
     if (this.guardTimer) {
       return;
@@ -1145,11 +1309,11 @@ export class CfshareManager {
 
       const onLine = (line: string) => {
         this.appendLog(session, "tunnel", line);
-        const match = line.match(CLOUDFLARE_URL_RE);
-        if (match && !settled) {
+        const url = pickQuickTunnelUrlFromLine(line);
+        if (url && !settled) {
           settled = true;
           clearTimeout(timeout);
-          resolve({ process: proc, publicUrl: match[0] });
+          resolve({ process: proc, publicUrl: url });
         }
       };
 
@@ -1192,6 +1356,51 @@ export class CfshareManager {
         }
       });
     });
+  }
+
+  private async startTunnelWithRetry(params: {
+    session: ExposureSession;
+    targetPort: number;
+    maxAttempts?: number;
+  }): Promise<CloudflaredStartResult> {
+    const maxAttempts = Math.max(1, Math.trunc(params.maxAttempts ?? 2));
+    let lastError = "unknown";
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let tunnel: CloudflaredStartResult | undefined;
+      try {
+        this.appendLog(
+          params.session,
+          "manager",
+          `starting tunnel attempt ${attempt}/${maxAttempts} on port ${params.targetPort}`,
+        );
+        tunnel = await this.startTunnel(params.session, params.targetPort);
+
+        if (!isValidQuickTunnelUrl(tunnel.publicUrl)) {
+          throw new Error(`invalid quick tunnel url: ${tunnel.publicUrl}`);
+        }
+
+        this.appendLog(
+          params.session,
+          "manager",
+          `tunnel ready on attempt ${attempt}/${maxAttempts}: ${tunnel.publicUrl}`,
+        );
+        return tunnel;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+        this.appendLog(
+          params.session,
+          "manager",
+          `tunnel attempt ${attempt}/${maxAttempts} failed: ${lastError}`,
+        );
+        if (tunnel?.process) {
+          this.appendLog(params.session, "manager", "stopping failed tunnel process before retry");
+          await this.terminateProcess(tunnel.process);
+        }
+      }
+    }
+
+    throw new Error(`failed to start cloudflared tunnel after ${maxAttempts} attempts: ${lastError}`);
   }
 
   private async terminateProcess(proc?: ChildProcessWithoutNullStreams): Promise<void> {
@@ -1340,7 +1549,11 @@ export class CfshareManager {
         tunnelTargetPort = proxy.port;
       }
 
-      const tunnel = await this.startTunnel(session, tunnelTargetPort);
+      const tunnel = await this.startTunnelWithRetry({
+        session,
+        targetPort: tunnelTargetPort,
+        maxAttempts: 2,
+      });
       session.process = tunnel.process;
       session.publicUrl = tunnel.publicUrl;
       session.status = "running";
@@ -1423,6 +1636,7 @@ export class CfshareManager {
     const id = randomId("files");
     const workspaceDir = path.join(this.workspaceRoot, id);
     await mkdirp(workspaceDir);
+    const inputSummary = await this.summarizeExposeInputs(params.paths);
 
     const session: ExposureSession = {
       id,
@@ -1479,7 +1693,11 @@ export class CfshareManager {
         session.tunnelPort = tunnelTargetPort;
       }
 
-      const tunnel = await this.startTunnel(session, tunnelTargetPort);
+      const tunnel = await this.startTunnelWithRetry({
+        session,
+        targetPort: tunnelTargetPort,
+        maxAttempts: 2,
+      });
       session.process = tunnel.process;
       session.publicUrl = tunnel.publicUrl;
       session.status = "running";
@@ -1512,13 +1730,21 @@ export class CfshareManager {
         },
       });
 
+      const responseManifest = this.buildExposeFilesResponseManifest({
+        inputs: inputSummary,
+        fullManifest: session.manifest ?? [],
+        detailedLimit: MAX_RESPONSE_MANIFEST_ITEMS,
+      });
+
       return {
         id: session.id,
         public_url: session.publicUrl,
         expires_at: session.expiresAt,
         mode,
         presentation,
-        manifest: session.manifest,
+        manifest_mode: responseManifest.manifest_mode,
+        manifest_meta: responseManifest.manifest_meta,
+        manifest: responseManifest.manifest,
       };
     } catch (error) {
       session.status = "error";
@@ -1638,6 +1864,8 @@ export class CfshareManager {
     session: ExposureSession,
     opts?: {
       probe_public?: boolean;
+      include_manifest?: boolean;
+      manifest_limit?: number;
     },
   ): Promise<Record<string, unknown>> {
     const tunnelAlive = Boolean(session.process && !session.process.killed);
@@ -1682,8 +1910,11 @@ export class CfshareManager {
             presentation: session.filePresentation ?? "download",
           }
         : undefined;
+    const includeManifest = Boolean(opts?.include_manifest);
+    const manifestBundle =
+      session.type === "files" ? this.makeManifestResponse(session.manifest, opts?.manifest_limit) : undefined;
 
-    return {
+    const detail: Record<string, unknown> = {
       id: session.id,
       type: session.type,
       created_at: session.createdAt,
@@ -1705,8 +1936,14 @@ export class CfshareManager {
       usage_snippets: this.makeUsageSnippets(session),
       file_sharing: fileSharing,
       last_error: session.lastError,
-      manifest: session.manifest,
     };
+    if (manifestBundle) {
+      detail.manifest_meta = manifestBundle.manifest_meta;
+      if (includeManifest) {
+        detail.manifest = manifestBundle.manifest;
+      }
+    }
+    return detail;
   }
 
   private projectExposureDetail(
@@ -1725,6 +1962,9 @@ export class CfshareManager {
       }
       if (Object.prototype.hasOwnProperty.call(detail, field)) {
         out[field] = detail[field];
+        if (field === "manifest" && Object.prototype.hasOwnProperty.call(detail, "manifest_meta")) {
+          out.manifest_meta = detail.manifest_meta;
+        }
       }
     }
     return out;
@@ -1762,17 +2002,32 @@ export class CfshareManager {
       if (!session) {
         return { id: legacyId, status: "not_found" };
       }
-      return await this.buildExposureDetail(session, params.opts);
+      return await this.buildExposureDetail(session, {
+        probe_public: params.opts?.probe_public,
+        include_manifest: true,
+        manifest_limit: MAX_RESPONSE_MANIFEST_ITEMS,
+      });
     }
 
+    const manifestRequested = typedFields?.includes("manifest") ?? false;
+    const manifestLimit =
+      selection.selectedIds.length > 1
+        ? MAX_RESPONSE_MANIFEST_ITEMS_MULTI_GET
+        : MAX_RESPONSE_MANIFEST_ITEMS;
+    const responseSelectedIds = selection.selectedIds.slice(0, MAX_EXPOSURE_GET_ITEMS);
+    const selectedIdsTruncated = selection.selectedIds.length > responseSelectedIds.length;
     const items: Record<string, unknown>[] = [];
-    for (const id of selection.selectedIds) {
+    for (const id of responseSelectedIds) {
       const session = this.sessions.get(id);
       if (!session) {
         items.push(this.makeExposureGetNotFound(id, typedFields));
         continue;
       }
-      const detail = await this.buildExposureDetail(session, params.opts);
+      const detail = await this.buildExposureDetail(session, {
+        probe_public: params.opts?.probe_public,
+        include_manifest: manifestRequested,
+        manifest_limit: manifestLimit,
+      });
       items.push(this.projectExposureDetail(detail, typedFields));
     }
     for (const missingId of selection.missingIds) {
@@ -1782,7 +2037,9 @@ export class CfshareManager {
     return {
       items,
       count: items.length,
-      matched_ids: selection.selectedIds,
+      matched_ids: responseSelectedIds,
+      matched_total_count: selection.selectedIds.length,
+      matched_ids_truncated: selectedIdsTruncated,
       missing_ids: selection.missingIds,
       filter: params.filter,
       fields: typedFields,
@@ -1882,7 +2139,7 @@ export class CfshareManager {
   }
 
   private exposureLogsOne(session: ExposureSession, opts?: ExposureLogsOpts): Record<string, unknown> {
-    const lines = Math.max(1, Math.min(10_000, Math.trunc(opts?.lines ?? 200)));
+    const lines = Math.max(1, Math.min(MAX_EXPOSURE_LOG_LINES_RESPONSE, Math.trunc(opts?.lines ?? 200)));
     const component = opts?.component ?? "all";
     const threshold =
       typeof opts?.since_seconds === "number"
@@ -1916,6 +2173,8 @@ export class CfshareManager {
 
     const includeAll = requested.includes("all");
     const targetIds = includeAll ? Array.from(this.sessions.keys()) : requested;
+    const responseTargetIds = targetIds.slice(0, MAX_EXPOSURE_LOG_ITEMS);
+    const targetIdsTruncated = targetIds.length > responseTargetIds.length;
 
     const singleLegacy = !Array.isArray(idOrIds) && !includeAll;
     if (singleLegacy) {
@@ -1928,7 +2187,7 @@ export class CfshareManager {
 
     const missingIds: string[] = [];
     const items: Record<string, unknown>[] = [];
-    for (const id of targetIds) {
+    for (const id of responseTargetIds) {
       const session = this.sessions.get(id);
       if (!session) {
         missingIds.push(id);
@@ -1940,8 +2199,10 @@ export class CfshareManager {
 
     return {
       items,
-      requested_count: targetIds.length,
-      found_count: targetIds.length - missingIds.length,
+      requested_count: responseTargetIds.length,
+      requested_total_count: targetIds.length,
+      requested_ids_truncated: targetIdsTruncated,
+      found_count: responseTargetIds.length - missingIds.length,
       missing_ids: missingIds,
     };
   }

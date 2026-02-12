@@ -20,6 +20,11 @@ metadata:
 
 Expose local services, ports, files, or directories as temporary public `https://*.trycloudflare.com` links.
 
+**This tool is useful when you need to:**
+
+1. Share files;
+2. Present web pages, services, lengthy Markdown content, PDFs, images, audio, video, and other media.
+
 ---
 
 ## Standard Workflow

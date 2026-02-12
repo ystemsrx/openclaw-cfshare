@@ -1,6 +1,6 @@
 {
   "name": "@ystemsrx/cfshare",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "OpenClaw plugin to safely expose local ports/files via Cloudflare Quick Tunnel",
   "license": "MIT",

@@ -22,7 +22,7 @@ Expose local services, ports, files, or directories as temporary public `https:/
 
 **This tool is useful when you need to:**
 
-1. Share files;
+1. Share or send files;
 2. Present web pages, services, lengthy Markdown content, PDFs, images, audio, video, and other media.
 
 ---

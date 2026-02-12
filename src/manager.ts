@@ -282,7 +282,22 @@ function normalizeWorkspaceRelativePath(input: string | undefined): string | und
 }
 
 function sanitizeFilename(input: string): string {
-  return input.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/_+/g, "_");
+  // Keep Unicode to preserve original filenames, but replace characters that are
+  // invalid or problematic across common filesystems (Windows in particular).
+  // We only sanitize a single path segment (basename), not a full path.
+  //
+  // Reference set:
+  // - ASCII control chars: 0x00-0x1F and 0x7F
+  // - Windows reserved: <>:"/\\|?*
+  // - Trailing dots/spaces are invalid on Windows
+  const cleaned = input
+    .replace(/[\u0000-\u001F\u007F]/g, "_")
+    .replace(/[<>:"/\\|?*]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/[. ]+$/g, "_");
+
+  const trimmed = cleaned.trim();
+  return trimmed || "item";
 }
 
 function ensureString(input: unknown): string | undefined {
@@ -1097,10 +1112,12 @@ export class CfshareManager {
       zip.outputStream.pipe(out);
 
       for (const relPath of files) {
-        if (relPath === path.basename(zipPath)) {
+        // Zip entries should use "/" separators regardless of OS.
+        const zipEntry = relPath.split(path.sep).join("/");
+        if (zipEntry === path.basename(zipPath)) {
           continue;
         }
-        zip.addFile(path.join(workspaceDir, relPath), relPath);
+        zip.addFile(path.join(workspaceDir, relPath), zipEntry);
       }
       zip.end();
     });
@@ -1316,6 +1333,7 @@ export class CfshareManager {
             res,
             session: params.session,
             filePath: zipBundle.zipPath,
+            downloadName: "download.zip",
             presentation: "download",
             countAsDownload: true,
           });
@@ -1421,10 +1439,23 @@ export class CfshareManager {
 
       const sourceStat = await fs.stat(real);
       const baseName = sanitizeFilename(path.basename(real) || "item");
-      let target = path.join(workspaceDir, baseName);
+      const makeCandidate = (n: number) => {
+        if (n === 0) {
+          return baseName;
+        }
+        // For directories, treat dots as part of the name (do not split extension).
+        if (sourceStat.isDirectory()) {
+          return `${baseName}_${n}`;
+        }
+        // For files, keep extension stable: "a.txt" -> "a_1.txt".
+        const parsed = path.parse(baseName);
+        return `${parsed.name || "item"}_${n}${parsed.ext || ""}`;
+      };
+
+      let target = path.join(workspaceDir, makeCandidate(0));
       let seq = 1;
       while (await fileExists(target)) {
-        target = path.join(workspaceDir, `${baseName}_${seq}`);
+        target = path.join(workspaceDir, makeCandidate(seq));
         seq += 1;
       }
 

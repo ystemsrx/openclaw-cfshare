@@ -168,6 +168,33 @@ openclaw gateway restart
 
 ---
 
+## 🖥️ 直接命令行调用（无需 OpenClaw）
+
+现在你也可以在安装后直接从终端调用 CFShare：
+
+```bash
+npm install -g @ystemsrx/cfshare
+cfshare env_check
+```
+
+常用示例：
+
+```bash
+# 暴露已有本地服务（默认会持续运行，直到 Ctrl+C）
+cfshare expose_port '{"port":3000,"opts":{"access":"token"}}'
+
+# 分享文件/目录
+cfshare expose_files '{"paths":["./dist"],"opts":{"access":"none"}}'
+
+# 停止分享
+cfshare exposure_stop '{"id":"all"}'
+```
+
+`expose_port` 与 `expose_files` 默认会保持进程运行以维持隧道。
+如果你只想输出结果后立即退出，可加 `--no-keep-alive`。
+
+---
+
 ## ⚙️ 配置（可选）
 
 CFShare 开箱即用，以下默认配置适合绝大多数场景。如需调整，编辑 `~/.openclaw/openclaw.json`：

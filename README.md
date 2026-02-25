@@ -168,6 +168,33 @@ openclaw gateway restart
 
 ---
 
+## 🖥️ Direct CLI Usage (No OpenClaw Required)
+
+You can now call CFShare directly from the terminal after npm installation:
+
+```bash
+npm install -g @ystemsrx/cfshare
+cfshare env_check
+```
+
+Common examples:
+
+```bash
+# Expose an existing local service (keeps running until Ctrl+C by default)
+cfshare expose_port '{"port":3000,"opts":{"access":"token"}}'
+
+# Share files/directories
+cfshare expose_files '{"paths":["./dist"],"opts":{"access":"none"}}'
+
+# Stop an exposure
+cfshare exposure_stop '{"id":"all"}'
+```
+
+`expose_port` and `expose_files` keep the process alive by default so the tunnel stays active.
+Use `--no-keep-alive` if you only want to print the result and exit.
+
+---
+
 ## ⚙️ Configuration (Optional)
 
 CFShare works out of the box. The defaults below suit most use cases. To customize, edit `~/.openclaw/openclaw.json`:

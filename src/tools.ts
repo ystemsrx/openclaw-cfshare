@@ -1,3 +1,4 @@
+import type { TSchema } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { jsonResult } from "openclaw/plugin-sdk";
 import { CfshareManager } from "./manager.js";
@@ -27,7 +28,15 @@ type ToolContext = {
   workspaceDir?: string;
 };
 
-function registerToolsForContext(api: OpenClawPluginApi, ctx: ToolContext) {
+type RegisteredTool = {
+  name: string;
+  label: string;
+  description: string;
+  parameters: TSchema | Record<string, unknown>;
+  execute: (...args: any[]) => Promise<unknown>;
+};
+
+function registerToolsForContext(api: OpenClawPluginApi, ctx: ToolContext): RegisteredTool[] {
   const manager = getManager(api);
 
   return [
@@ -250,7 +259,7 @@ export function registerCfshareTools(api: OpenClawPluginApi) {
     "audit_export",
   ];
 
-  api.registerTool((ctx) => registerToolsForContext(api, ctx), {
+  api.registerTool((ctx: ToolContext) => registerToolsForContext(api, ctx), {
     names,
   });
 }

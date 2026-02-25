@@ -30,6 +30,8 @@ import type {
   RateLimitPolicy,
 } from "./types.js";
 
+export type CfshareRuntimeApi = Pick<OpenClawPluginApi, "logger" | "resolvePath" | "pluginConfig">;
+
 const MAX_LOG_LINES = 4000;
 const MAX_RESPONSE_MANIFEST_ITEMS = 200;
 const MAX_RESPONSE_MANIFEST_ITEMS_MULTI_GET = 20;
@@ -715,7 +717,7 @@ function matchAuditFilters(
 }
 
 export class CfshareManager {
-  private readonly logger: OpenClawPluginApi["logger"];
+  private readonly logger: CfshareRuntimeApi["logger"];
   private readonly resolvePath: (input: string) => string;
   private readonly pluginConfig: CfsharePluginConfig;
   private readonly cloudflaredPathInput: string;
@@ -736,7 +738,7 @@ export class CfshareManager {
   private guardTimer?: NodeJS.Timeout;
   private readonly sessions = new Map<string, ExposureSession>();
 
-  constructor(api: OpenClawPluginApi) {
+  constructor(api: CfshareRuntimeApi) {
     this.logger = api.logger;
     this.resolvePath = api.resolvePath;
     this.pluginConfig = (api.pluginConfig ?? {}) as CfsharePluginConfig;
@@ -893,7 +895,7 @@ export class CfshareManager {
       return queryToken === access.token || headerToken === access.token || bearer === access.token;
     }
     const basic = parseBasicAuth(req.headers.authorization);
-    return basic?.username === access.username && basic.password === access.password;
+    return basic?.username === access.username && basic?.password === access.password;
   }
 
   private async startReverseProxy(params: {
@@ -1609,7 +1611,7 @@ export class CfshareManager {
     this.appendLog(session, "tunnel", `spawn: ${cloudflaredBin} ${args.join(" ")}`);
 
     const proc = spawn(cloudflaredBin, args, {
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
 
     let settled = false;
@@ -1725,6 +1727,9 @@ export class CfshareManager {
       return;
     }
     const pid = proc.pid;
+    if (!pid) {
+      return;
+    }
     try {
       process.kill(pid, 0);
     } catch {

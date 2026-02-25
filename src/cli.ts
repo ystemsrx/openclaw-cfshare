@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -15,10 +17,14 @@ type CliOptions = {
   configFile?: string;
   workspaceDir?: string;
   keepAlive?: boolean;
+  detachedWorker?: boolean;
+  handoffFile?: string;
   compact?: boolean;
   help?: boolean;
   version?: boolean;
 };
+
+const DETACHED_HANDOFF_TIMEOUT_MS = 45_000;
 
 const TOOL_NAMES = new Set([
   "env_check",
@@ -144,6 +150,15 @@ function parseArgs(argv: string[]): CliOptions {
       i += 1;
       continue;
     }
+    if (token === "--detached-worker") {
+      opts.detachedWorker = true;
+      continue;
+    }
+    if (token === "--handoff-file") {
+      opts.handoffFile = assertValue(argv, i + 1, token);
+      i += 1;
+      continue;
+    }
     if (token === "--keep-alive") {
       opts.keepAlive = true;
       continue;
@@ -252,6 +267,120 @@ function shouldKeepAlive(keepAliveFlag: boolean | undefined): boolean {
   return false;
 }
 
+function isExposeCommand(command: string): boolean {
+  return command === "expose_port" || command === "expose_files";
+}
+
+function extractHandoffFileFromArgv(argv: string[]): string | undefined {
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] !== "--handoff-file") {
+      continue;
+    }
+    const value = argv[i + 1];
+    if (value && !value.startsWith("-")) {
+      return value;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+function stripDetachedControlArgs(argv: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i];
+    if (token === "--keep-alive" || token === "--no-keep-alive" || token === "--detached-worker") {
+      continue;
+    }
+    if (token === "--handoff-file") {
+      i += 1;
+      continue;
+    }
+    out.push(token);
+  }
+  return out;
+}
+
+function makeHandoffPath(): string {
+  return path.join(
+    os.tmpdir(),
+    `cfshare-handoff-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`,
+  );
+}
+
+async function writeHandoffFile(filePath: string | undefined, payload: unknown): Promise<void> {
+  if (!filePath) {
+    return;
+  }
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.${process.pid}.tmp`;
+  await fs.writeFile(tempPath, JSON.stringify(payload), "utf8");
+  await fs.rename(tempPath, filePath);
+}
+
+async function waitForDetachedHandoff(filePath: string, workerPid?: number): Promise<unknown> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < DETACHED_HANDOFF_TIMEOUT_MS) {
+    try {
+      const raw = await fs.readFile(filePath, "utf8");
+      await fs.rm(filePath, { force: true });
+      const parsed = JSON.parse(raw) as { ok?: unknown; result?: unknown; error?: unknown };
+      if (parsed.ok === true) {
+        return parsed.result;
+      }
+      if (typeof parsed.error === "string" && parsed.error.trim()) {
+        throw new Error(parsed.error);
+      }
+      throw new Error("failed to start detached exposure");
+    } catch (error) {
+      const errno = error as NodeJS.ErrnoException;
+      if (errno?.code !== "ENOENT" && !(error instanceof SyntaxError)) {
+        throw error;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  if (workerPid) {
+    try {
+      process.kill(workerPid, "SIGTERM");
+    } catch {
+      // ignore best-effort cleanup
+    }
+  }
+  throw new Error("timed out waiting for detached exposure startup");
+}
+
+async function runDetachedExposureWorker(): Promise<unknown> {
+  const scriptArg = process.argv[1];
+  if (!scriptArg) {
+    throw new Error("unable to resolve cli entry");
+  }
+  const scriptPath = path.resolve(scriptArg);
+  const handoffFile = makeHandoffPath();
+  const childArgs = [
+    scriptPath,
+    ...stripDetachedControlArgs(process.argv.slice(2)),
+    "--keep-alive",
+    "--detached-worker",
+    "--handoff-file",
+    handoffFile,
+    "--compact",
+  ];
+
+  const child = spawn(process.execPath, childArgs, {
+    detached: true,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      CFSHARE_DETACHED_WORKER: "1",
+    },
+  });
+  child.unref();
+
+  return await waitForDetachedHandoff(handoffFile, child.pid ?? undefined);
+}
+
 async function waitUntilExposureStops(manager: CfshareManager, id: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     let stopping = false;
@@ -340,7 +469,7 @@ async function runTool(
     );
   }
   if (command === "exposure_list") {
-    return manager.exposureList();
+    return await manager.exposureList();
   }
   if (command === "exposure_get") {
     return await manager.exposureGet(
@@ -467,9 +596,19 @@ async function main() {
 
   const params = asObject(paramsInput, "params");
   const config = asObject(configInput, "config") as CfsharePluginConfig;
+
+  if (isExposeCommand(command) && !shouldKeepAlive(options.keepAlive) && !options.detachedWorker) {
+    const detachedResult = await runDetachedExposureWorker();
+    process.stdout.write(
+      `${JSON.stringify(detachedResult, null, options.compact ? undefined : 2)}\n`,
+    );
+    return;
+  }
+
   const manager = new CfshareManager(createRuntimeApi(config));
 
   const result = await runTool(manager, command, params, options);
+  await writeHandoffFile(options.handoffFile, { ok: true, result });
   process.stdout.write(`${JSON.stringify(result, null, options.compact ? undefined : 2)}\n`);
 
   if (shouldKeepAlive(options.keepAlive)) {
@@ -486,6 +625,14 @@ async function main() {
 
 void main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
+  const handoffFile = extractHandoffFileFromArgv(process.argv.slice(2));
+  if (handoffFile) {
+    try {
+      writeFileSync(handoffFile, JSON.stringify({ ok: false, error: message }), "utf8");
+    } catch {
+      // ignore handoff write failure
+    }
+  }
   process.stderr.write(`cfshare error: ${message}\n`);
   process.exit(1);
 });

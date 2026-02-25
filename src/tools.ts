@@ -87,7 +87,7 @@ function registerToolsForContext(api: OpenClawPluginApi, ctx: ToolContext): Regi
       description: "List all active and tracked exposure sessions",
       parameters: ExposureListSchema,
       async execute() {
-        return jsonResult(manager.exposureList());
+        return jsonResult(await manager.exposureList());
       },
     },
     {

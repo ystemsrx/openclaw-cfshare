@@ -23,6 +23,7 @@ import type {
   CfsharePolicy,
   ExposureRecord,
   ExposureSession,
+  ExposureStats,
   ExposureStatus,
   ExposureType,
   FilePresentationMode,
@@ -138,6 +139,29 @@ type ManifestResponseMeta = {
   returned_count: number;
   truncated: boolean;
   total_size_bytes: number;
+};
+
+type PersistedSessionRecord = {
+  id: string;
+  type: ExposureType;
+  status: ExposureStatus;
+  createdAt: string;
+  expiresAt: string;
+  localUrl: string;
+  publicUrl?: string;
+  sourcePort?: number;
+  originPort: number;
+  tunnelPort: number;
+  workspaceDir?: string;
+  processPid?: number;
+  ownerPid?: number;
+  fileMode?: "normal" | "zip";
+  filePresentation?: FilePresentationMode;
+  maxDownloads?: number;
+  manifest?: ManifestEntry[];
+  access: AccessState;
+  stats: ExposureStats;
+  lastError?: string;
 };
 
 function nowIso(): string {
@@ -308,6 +332,19 @@ function ensureString(input: unknown): string | undefined {
   }
   const trimmed = input.trim();
   return trimmed || undefined;
+}
+
+function asNumber(input: unknown): number | undefined {
+  if (typeof input === "number" && Number.isFinite(input)) {
+    return Math.trunc(input);
+  }
+  if (typeof input === "string" && input.trim()) {
+    const parsed = Number(input);
+    if (Number.isFinite(parsed)) {
+      return Math.trunc(parsed);
+    }
+  }
+  return undefined;
 }
 
 function buildContentDisposition(params: {
@@ -727,6 +764,7 @@ export class CfshareManager {
   private readonly workspaceRoot: string;
   private readonly auditFile: string;
   private readonly sessionsFile: string;
+  private readonly sessionsDir: string;
   private readonly exportsDir: string;
 
   private initialized = false;
@@ -753,6 +791,7 @@ export class CfshareManager {
     this.workspaceRoot = path.join(this.stateDir, "workspaces");
     this.auditFile = path.join(this.stateDir, "audit.jsonl");
     this.sessionsFile = path.join(this.stateDir, "sessions.json");
+    this.sessionsDir = path.join(this.stateDir, "sessions");
     this.exportsDir = path.join(this.stateDir, "exports");
     this.cloudflaredPathInput = this.pluginConfig.cloudflaredPath ?? "cloudflared";
   }
@@ -771,6 +810,7 @@ export class CfshareManager {
     await mkdirp(this.stateDir);
     await mkdirp(this.workspaceRoot);
     await mkdirp(this.exportsDir);
+    await mkdirp(this.sessionsDir);
     await this.reloadPolicy();
     this.startGuard();
     this.initialized = true;
@@ -803,16 +843,213 @@ export class CfshareManager {
     }
   }
 
-  private async persistSessionsSnapshot(): Promise<void> {
-    const records = Array.from(this.sessions.values()).map((session) => ({
+  private sessionRecordPath(id: string): string {
+    return path.join(this.sessionsDir, `${encodeURIComponent(id)}.json`);
+  }
+
+  private toPersistedSessionRecord(session: ExposureSession): PersistedSessionRecord {
+    return {
       id: session.id,
       type: session.type,
       status: session.status,
+      createdAt: session.createdAt,
       expiresAt: session.expiresAt,
+      localUrl: session.localUrl,
+      publicUrl: session.publicUrl,
+      sourcePort: session.sourcePort,
+      originPort: session.originPort,
+      tunnelPort: session.tunnelPort,
       workspaceDir: session.workspaceDir,
       processPid: session.process?.pid,
-    }));
-    await fs.writeFile(this.sessionsFile, JSON.stringify(records, null, 2), "utf8");
+      ownerPid: process.pid,
+      fileMode: session.fileMode,
+      filePresentation: session.filePresentation,
+      maxDownloads: session.maxDownloads,
+      manifest: session.manifest,
+      access: session.access,
+      stats: session.stats,
+      lastError: session.lastError,
+    };
+  }
+
+  private parsePersistedSessionRecord(raw: unknown): PersistedSessionRecord | undefined {
+    if (!raw || typeof raw !== "object") {
+      return undefined;
+    }
+    const row = raw as Record<string, unknown>;
+    const id = ensureString(row.id);
+    const type = ensureString(row.type);
+    const status = ensureString(row.status);
+    if (!id || (type !== "port" && type !== "files")) {
+      return undefined;
+    }
+    const normalizedStatus: ExposureStatus =
+      status === "starting" || status === "running" || status === "stopped" || status === "error" || status === "expired"
+        ? status
+        : "error";
+    const accessRaw = (row.access ?? {}) as Record<string, unknown>;
+    const accessModeRaw = ensureString(accessRaw.mode);
+    const accessMode: AccessMode =
+      accessModeRaw === "token" || accessModeRaw === "basic" || accessModeRaw === "none" ? accessModeRaw : "none";
+    const statsRaw = (row.stats ?? {}) as Record<string, unknown>;
+    return {
+      id,
+      type,
+      status: normalizedStatus,
+      createdAt: ensureString(row.createdAt) || nowIso(),
+      expiresAt: ensureString(row.expiresAt) || nowIso(),
+      localUrl: ensureString(row.localUrl) || "",
+      publicUrl: ensureString(row.publicUrl) || undefined,
+      sourcePort: asNumber(row.sourcePort),
+      originPort: asNumber(row.originPort) ?? 0,
+      tunnelPort: asNumber(row.tunnelPort) ?? 0,
+      workspaceDir: ensureString(row.workspaceDir) || undefined,
+      processPid: asNumber(row.processPid),
+      ownerPid: asNumber(row.ownerPid),
+      fileMode: ensureString(row.fileMode) === "zip" ? "zip" : "normal",
+      filePresentation: normalizeFilePresentation(ensureString(row.filePresentation) || "download"),
+      maxDownloads: asNumber(row.maxDownloads),
+      manifest: Array.isArray(row.manifest) ? (row.manifest as ManifestEntry[]) : undefined,
+      access: {
+        mode: accessMode,
+        protectOrigin: Boolean(accessRaw.protectOrigin),
+        allowlistPaths: normalizeAllowlistPaths(accessRaw.allowlistPaths as string[] | undefined),
+        token: ensureString(accessRaw.token) || undefined,
+        username: ensureString(accessRaw.username) || undefined,
+        password: ensureString(accessRaw.password) || undefined,
+      },
+      stats: {
+        requests: asNumber(statsRaw.requests) ?? 0,
+        downloads: asNumber(statsRaw.downloads) ?? 0,
+        bytesSent: asNumber(statsRaw.bytesSent) ?? 0,
+        lastAccessAt: ensureString(statsRaw.lastAccessAt) || undefined,
+      },
+      lastError: ensureString(row.lastError) || undefined,
+    };
+  }
+
+  private async readPersistedSessions(): Promise<Map<string, PersistedSessionRecord>> {
+    const out = new Map<string, PersistedSessionRecord>();
+    let sessionsDirMissing = false;
+    const entries = await fs.readdir(this.sessionsDir, { withFileTypes: true }).catch((error) => {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        sessionsDirMissing = true;
+      }
+      return [];
+    });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) {
+        continue;
+      }
+      const abs = path.join(this.sessionsDir, entry.name);
+      try {
+        const raw = await fs.readFile(abs, "utf8");
+        const record = this.parsePersistedSessionRecord(JSON.parse(raw));
+        if (record) {
+          out.set(record.id, record);
+        }
+      } catch {
+        // ignore malformed session files
+      }
+    }
+
+    if (out.size > 0 || !sessionsDirMissing) {
+      return out;
+    }
+
+    // Legacy fallback for snapshots generated before per-session persistence.
+    try {
+      const raw = await fs.readFile(this.sessionsFile, "utf8");
+      const rows = JSON.parse(raw);
+      if (!Array.isArray(rows)) {
+        return out;
+      }
+      for (const row of rows) {
+        const record = this.parsePersistedSessionRecord({
+          ...(row as Record<string, unknown>),
+          createdAt: (row as Record<string, unknown>).createdAt ?? nowIso(),
+          localUrl: (row as Record<string, unknown>).localUrl ?? "",
+          originPort: (row as Record<string, unknown>).originPort ?? 0,
+          tunnelPort: (row as Record<string, unknown>).tunnelPort ?? 0,
+          access:
+            (row as Record<string, unknown>).access ??
+            ({
+              mode: "none",
+              protectOrigin: false,
+              allowlistPaths: [],
+            } as AccessState),
+          stats:
+            (row as Record<string, unknown>).stats ??
+            ({
+              requests: 0,
+              downloads: 0,
+              bytesSent: 0,
+            } as ExposureStats),
+        });
+        if (record) {
+          out.set(record.id, record);
+        }
+      }
+    } catch {
+      // ignore missing legacy snapshot
+    }
+    return out;
+  }
+
+  private async writePersistedSessionRecord(record: PersistedSessionRecord): Promise<void> {
+    const target = this.sessionRecordPath(record.id);
+    const tmp = `${target}.${process.pid}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(record, null, 2), "utf8");
+    await fs.rename(tmp, target);
+  }
+
+  private async deletePersistedSessionRecord(id: string): Promise<void> {
+    await fs.rm(this.sessionRecordPath(id), { force: true });
+  }
+
+  private isProcessAlive(pid: number | undefined): boolean {
+    if (!pid || !Number.isInteger(pid) || pid <= 0) {
+      return false;
+    }
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async persistSessionsSnapshot(): Promise<void> {
+    const activeIds = new Set<string>();
+    const records = Array.from(this.sessions.values()).map((session) => {
+      const record = this.toPersistedSessionRecord(session);
+      activeIds.add(record.id);
+      return record;
+    });
+    await Promise.all(records.map((record) => this.writePersistedSessionRecord(record)));
+
+    const persisted = await this.readPersistedSessions();
+    for (const record of persisted.values()) {
+      if (record.ownerPid !== process.pid || activeIds.has(record.id)) {
+        continue;
+      }
+      await this.deletePersistedSessionRecord(record.id);
+    }
+
+    const mergedRows = Array.from((await this.readPersistedSessions()).values())
+      .map((record) => ({
+        id: record.id,
+        type: record.type,
+        status: record.status,
+        expiresAt: record.expiresAt,
+        workspaceDir: record.workspaceDir,
+        processPid: record.processPid,
+        ownerPid: record.ownerPid,
+        publicUrl: record.publicUrl,
+        localUrl: record.localUrl,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    await fs.writeFile(this.sessionsFile, JSON.stringify(mergedRows, null, 2), "utf8");
   }
 
   private makeAccessState(params: {
@@ -845,22 +1082,25 @@ export class CfshareManager {
     };
   }
 
-  private makeResponsePublicUrl(session: ExposureSession): string | undefined {
-    const base = session.publicUrl;
+  private makeResponsePublicUrlFromValues(base: string | undefined, access: AccessState): string | undefined {
     if (!base) {
       return undefined;
     }
-    if (session.access.mode !== "token" || !session.access.token) {
+    if (access.mode !== "token" || !access.token) {
       return base;
     }
     try {
       const out = new URL(base);
-      out.searchParams.set("token", session.access.token);
+      out.searchParams.set("token", access.token);
       return out.toString();
     } catch {
       const sep = base.includes("?") ? "&" : "?";
-      return `${base}${sep}token=${encodeURIComponent(session.access.token)}`;
+      return `${base}${sep}token=${encodeURIComponent(access.token)}`;
     }
+  }
+
+  private makeResponsePublicUrl(session: Pick<ExposureSession, "publicUrl" | "access">): string | undefined {
+    return this.makeResponsePublicUrlFromValues(session.publicUrl, session.access);
   }
 
   private buildRateLimiter(policy: RateLimitPolicy): (ip: string) => boolean {
@@ -2086,8 +2326,27 @@ export class CfshareManager {
     }
   }
 
-  exposureList(): ExposureRecord[] {
-    return Array.from(this.sessions.values()).map((session) => this.makeExposureRecord(session));
+  async exposureList(): Promise<ExposureRecord[]> {
+    await this.ensureInitialized();
+    const persisted = await this.readPersistedSessions();
+    const out = new Map<string, ExposureRecord>();
+    for (const session of this.sessions.values()) {
+      out.set(session.id, this.makeExposureRecord(session));
+    }
+    for (const record of persisted.values()) {
+      if (out.has(record.id)) {
+        continue;
+      }
+      out.set(record.id, {
+        id: record.id,
+        type: record.type,
+        status: record.status,
+        public_url: this.makeResponsePublicUrlFromValues(record.publicUrl, record.access),
+        local_url: record.localUrl,
+        expires_at: record.expiresAt,
+      });
+    }
+    return Array.from(out.values()).sort((a, b) => a.id.localeCompare(b.id));
   }
 
   private normalizeRequestedIds(rawIds: string[]): string[] {
@@ -2107,36 +2366,81 @@ export class CfshareManager {
     return out;
   }
 
-  private matchesExposureFilter(session: ExposureSession, filter?: ExposureFilter): boolean {
+  private matchesExposureFilterByValues(
+    type: ExposureType,
+    status: ExposureStatus,
+    filter?: ExposureFilter,
+  ): boolean {
     if (!filter) {
       return true;
     }
-    if (filter.status && session.status !== filter.status) {
+    if (filter.status && status !== filter.status) {
       return false;
     }
-    if (filter.type && session.type !== filter.type) {
+    if (filter.type && type !== filter.type) {
       return false;
     }
     return true;
+  }
+
+  private matchesExposureFilter(session: ExposureSession, filter?: ExposureFilter): boolean {
+    return this.matchesExposureFilterByValues(session.type, session.status, filter);
+  }
+
+  private async loadSessionLookupMap(): Promise<
+    Map<string, { live?: ExposureSession; persisted?: PersistedSessionRecord }>
+  > {
+    const out = new Map<string, { live?: ExposureSession; persisted?: PersistedSessionRecord }>();
+    for (const session of this.sessions.values()) {
+      out.set(session.id, { live: session });
+    }
+    const persisted = await this.readPersistedSessions();
+    for (const [id, record] of persisted.entries()) {
+      const current = out.get(id);
+      if (current) {
+        current.persisted = record;
+      } else {
+        out.set(id, { persisted: record });
+      }
+    }
+    return out;
   }
 
   private resolveExposureSelection(query: {
     id?: string;
     ids?: string[];
     filter?: ExposureFilter;
-  }): { selectorUsed: boolean; selectedIds: string[]; missingIds: string[] } {
+  }, lookupMap: Map<string, { live?: ExposureSession; persisted?: PersistedSessionRecord }>): {
+    selectorUsed: boolean;
+    selectedIds: string[];
+    missingIds: string[];
+  } {
     const explicitIds = this.normalizeRequestedIds([
       ...(typeof query.id === "string" ? [query.id] : []),
       ...((query.ids ?? []).filter((value): value is string => typeof value === "string")),
     ]);
 
     const hasAll = explicitIds.includes("all");
-    const allSessions = Array.from(this.sessions.values());
+    const allIds = Array.from(lookupMap.keys());
 
     if (hasAll) {
-      const selectedIds = allSessions
-        .filter((session) => this.matchesExposureFilter(session, query.filter))
-        .map((session) => session.id);
+      const selectedIds = allIds.filter((id) => {
+        const lookup = lookupMap.get(id);
+        if (!lookup) {
+          return false;
+        }
+        if (lookup.live) {
+          return this.matchesExposureFilter(lookup.live, query.filter);
+        }
+        if (lookup.persisted) {
+          return this.matchesExposureFilterByValues(
+            lookup.persisted.type,
+            lookup.persisted.status,
+            query.filter,
+          );
+        }
+        return false;
+      });
       return { selectorUsed: true, selectedIds, missingIds: [] };
     }
 
@@ -2144,12 +2448,19 @@ export class CfshareManager {
       const selectedIds: string[] = [];
       const missingIds: string[] = [];
       for (const id of explicitIds) {
-        const session = this.sessions.get(id);
-        if (!session) {
+        const lookup = lookupMap.get(id);
+        if (!lookup) {
           missingIds.push(id);
           continue;
         }
-        if (this.matchesExposureFilter(session, query.filter)) {
+        if (lookup.live && this.matchesExposureFilter(lookup.live, query.filter)) {
+          selectedIds.push(id);
+          continue;
+        }
+        if (
+          lookup.persisted &&
+          this.matchesExposureFilterByValues(lookup.persisted.type, lookup.persisted.status, query.filter)
+        ) {
           selectedIds.push(id);
         }
       }
@@ -2157,9 +2468,23 @@ export class CfshareManager {
     }
 
     if (query.filter) {
-      const selectedIds = allSessions
-        .filter((session) => this.matchesExposureFilter(session, query.filter))
-        .map((session) => session.id);
+      const selectedIds = allIds.filter((id) => {
+        const lookup = lookupMap.get(id);
+        if (!lookup) {
+          return false;
+        }
+        if (lookup.live) {
+          return this.matchesExposureFilter(lookup.live, query.filter);
+        }
+        if (lookup.persisted) {
+          return this.matchesExposureFilterByValues(
+            lookup.persisted.type,
+            lookup.persisted.status,
+            query.filter,
+          );
+        }
+        return false;
+      });
       return { selectorUsed: true, selectedIds, missingIds: [] };
     }
 
@@ -2180,34 +2505,9 @@ export class CfshareManager {
         ? await probeLocalPort(session.sourcePort ?? session.originPort)
         : Boolean(session.originServer?.listening);
 
-    let publicProbe: { ok: boolean; status?: number; error?: string } | undefined;
-    if (opts?.probe_public && session.publicUrl) {
-      try {
-        const probeUrl = new URL(session.publicUrl);
-        if (session.access.mode === "token" && session.access.token) {
-          probeUrl.searchParams.set("token", session.access.token);
-        }
-
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), DEFAULT_PROBE_TIMEOUT_MS);
-        const headers: Record<string, string> = {};
-        if (session.access.mode === "basic" && session.access.username && session.access.password) {
-          headers.authorization = `Basic ${Buffer.from(
-            `${session.access.username}:${session.access.password}`,
-          ).toString("base64")}`;
-        }
-
-        const response = await fetch(probeUrl.toString(), {
-          method: "HEAD",
-          signal: controller.signal,
-          headers,
-        });
-        clearTimeout(timer);
-        publicProbe = { ok: response.ok, status: response.status };
-      } catch (error) {
-        publicProbe = { ok: false, error: String(error) };
-      }
-    }
+    const publicProbe = opts?.probe_public
+      ? await this.probePublicEndpoint(session.publicUrl, session.access)
+      : undefined;
 
     const fileSharing =
       session.type === "files"
@@ -2251,6 +2551,98 @@ export class CfshareManager {
     return detail;
   }
 
+  private async probePublicEndpoint(
+    publicUrl: string | undefined,
+    access: AccessState,
+  ): Promise<{ ok: boolean; status?: number; error?: string } | undefined> {
+    if (!publicUrl) {
+      return undefined;
+    }
+    try {
+      const probeUrl = new URL(publicUrl);
+      if (access.mode === "token" && access.token) {
+        probeUrl.searchParams.set("token", access.token);
+      }
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), DEFAULT_PROBE_TIMEOUT_MS);
+      const headers: Record<string, string> = {};
+      if (access.mode === "basic" && access.username && access.password) {
+        headers.authorization = `Basic ${Buffer.from(
+          `${access.username}:${access.password}`,
+        ).toString("base64")}`;
+      }
+
+      const response = await fetch(probeUrl.toString(), {
+        method: "HEAD",
+        signal: controller.signal,
+        headers,
+      });
+      clearTimeout(timer);
+      return { ok: response.ok, status: response.status };
+    } catch (error) {
+      return { ok: false, error: String(error) };
+    }
+  }
+
+  private async buildPersistedExposureDetail(
+    record: PersistedSessionRecord,
+    opts?: {
+      probe_public?: boolean;
+      include_manifest?: boolean;
+      manifest_limit?: number;
+    },
+  ): Promise<Record<string, unknown>> {
+    const tunnelAlive = this.isProcessAlive(record.processPid);
+    const probePort =
+      record.type === "port" ? (record.sourcePort ?? record.originPort) : record.originPort;
+    const originAlive = probePort > 0 ? await probeLocalPort(probePort) : false;
+    const publicProbe = opts?.probe_public
+      ? await this.probePublicEndpoint(record.publicUrl, record.access)
+      : undefined;
+
+    const fileSharing =
+      record.type === "files"
+        ? {
+            mode: record.fileMode ?? "normal",
+            presentation: record.filePresentation ?? "download",
+          }
+        : undefined;
+    const includeManifest = Boolean(opts?.include_manifest);
+    const manifestBundle =
+      record.type === "files" ? this.makeManifestResponse(record.manifest, opts?.manifest_limit) : undefined;
+
+    const detail: Record<string, unknown> = {
+      id: record.id,
+      type: record.type,
+      created_at: record.createdAt,
+      status: {
+        state: record.status,
+        tunnel_alive: tunnelAlive,
+        origin_alive: originAlive,
+        public_probe: publicProbe,
+      },
+      port: {
+        source_port: record.sourcePort,
+        origin_port: record.originPort,
+        tunnel_port: record.tunnelPort,
+      },
+      public_url: this.makeResponsePublicUrlFromValues(record.publicUrl, record.access),
+      expires_at: record.expiresAt,
+      local_url: record.localUrl,
+      stats: record.stats,
+      file_sharing: fileSharing,
+      last_error: record.lastError,
+    };
+    if (manifestBundle) {
+      detail.manifest_meta = manifestBundle.manifest_meta;
+      if (includeManifest) {
+        detail.manifest = manifestBundle.manifest;
+      }
+    }
+    return detail;
+  }
+
   private projectExposureDetail(
     detail: Record<string, unknown>,
     fields?: ExposureGetField[],
@@ -2283,8 +2675,47 @@ export class CfshareManager {
     return out;
   }
 
+  private async stopPersistedSession(
+    record: PersistedSessionRecord,
+    opts: { reason?: string; expired?: boolean } | undefined,
+    cleaned: string[],
+  ): Promise<void> {
+    const uniquePids = Array.from(
+      new Set([record.ownerPid, record.processPid].filter((pid): pid is number => Boolean(pid && pid > 0))),
+    );
+    for (const pid of uniquePids) {
+      try {
+        process.kill(pid, 0);
+        process.kill(pid, "SIGTERM");
+      } catch (error) {
+        const errno = error as NodeJS.ErrnoException;
+        if (errno?.code !== "ESRCH") {
+          throw error;
+        }
+      }
+    }
+
+    if (record.workspaceDir && (await fileExists(record.workspaceDir))) {
+      await fs.rm(record.workspaceDir, { recursive: true, force: true });
+      cleaned.push(record.workspaceDir);
+    }
+    await this.deletePersistedSessionRecord(record.id);
+
+    await this.writeAudit({
+      ts: nowIso(),
+      event: opts?.expired ? "exposure_expired" : "exposure_stopped",
+      id: record.id,
+      type: record.type,
+      details: {
+        reason: opts?.reason,
+        public_url: record.publicUrl,
+      },
+    });
+  }
+
   async exposureGet(params: ExposureGetParams): Promise<Record<string, unknown>> {
     await this.ensureInitialized();
+    const lookupMap = await this.loadSessionLookupMap();
 
     const fields = Array.isArray(params.fields) ? this.normalizeRequestedIds(params.fields) : undefined;
     const typedFields = fields as ExposureGetField[] | undefined;
@@ -2295,7 +2726,7 @@ export class CfshareManager {
       id: params.id,
       ids: params.ids,
       filter: params.filter,
-    });
+    }, lookupMap);
 
     if (!selection.selectorUsed) {
       throw new Error("id, ids, or filter is required");
@@ -2303,11 +2734,18 @@ export class CfshareManager {
 
     if (legacySingle) {
       const legacyId = params.id as string;
-      const session = this.sessions.get(legacyId);
-      if (!session) {
+      const lookup = lookupMap.get(legacyId);
+      if (!lookup) {
         return { id: legacyId, status: "not_found" };
       }
-      return await this.buildExposureDetail(session, {
+      if (lookup.live) {
+        return await this.buildExposureDetail(lookup.live, {
+          probe_public: params.opts?.probe_public,
+          include_manifest: true,
+          manifest_limit: MAX_RESPONSE_MANIFEST_ITEMS,
+        });
+      }
+      return await this.buildPersistedExposureDetail(lookup.persisted as PersistedSessionRecord, {
         probe_public: params.opts?.probe_public,
         include_manifest: true,
         manifest_limit: MAX_RESPONSE_MANIFEST_ITEMS,
@@ -2323,16 +2761,22 @@ export class CfshareManager {
     const selectedIdsTruncated = selection.selectedIds.length > responseSelectedIds.length;
     const items: Record<string, unknown>[] = [];
     for (const id of responseSelectedIds) {
-      const session = this.sessions.get(id);
-      if (!session) {
+      const lookup = lookupMap.get(id);
+      if (!lookup) {
         items.push(this.makeExposureGetNotFound(id, typedFields));
         continue;
       }
-      const detail = await this.buildExposureDetail(session, {
-        probe_public: params.opts?.probe_public,
-        include_manifest: manifestRequested,
-        manifest_limit: manifestLimit,
-      });
+      const detail = lookup.live
+        ? await this.buildExposureDetail(lookup.live, {
+            probe_public: params.opts?.probe_public,
+            include_manifest: manifestRequested,
+            manifest_limit: manifestLimit,
+          })
+        : await this.buildPersistedExposureDetail(lookup.persisted as PersistedSessionRecord, {
+            probe_public: params.opts?.probe_public,
+            include_manifest: manifestRequested,
+            manifest_limit: manifestLimit,
+          });
       items.push(this.projectExposureDetail(detail, typedFields));
     }
     for (const missingId of selection.missingIds) {
@@ -2356,6 +2800,7 @@ export class CfshareManager {
     opts?: { reason?: string; expired?: boolean; keepAudit?: boolean },
   ): Promise<Record<string, unknown>> {
     await this.ensureInitialized();
+    const lookupMap = await this.loadSessionLookupMap();
 
     const requested = this.normalizeRequestedIds(Array.isArray(idOrIds) ? idOrIds : [idOrIds]);
     if (requested.length === 0) {
@@ -2367,13 +2812,13 @@ export class CfshareManager {
     const failed: Array<{ id: string; error: string }> = [];
 
     if (includeAll) {
-      ids.push(...Array.from(this.sessions.keys()));
+      ids.push(...Array.from(lookupMap.keys()));
       if (ids.length === 0) {
         return { stopped: [], failed: [{ id: "all", error: "not_found" }], cleaned: [] };
       }
     } else {
       for (const id of requested) {
-        if (this.sessions.has(id)) {
+        if (lookupMap.has(id)) {
           ids.push(id);
         } else {
           failed.push({ id, error: "not_found" });
@@ -2390,48 +2835,56 @@ export class CfshareManager {
     const cleaned: string[] = [];
 
     for (const id of stopIds) {
-      const session = this.sessions.get(id);
-      if (!session) {
+      const lookup = lookupMap.get(id);
+      if (!lookup) {
         failed.push({ id, error: "not_found" });
         continue;
       }
+      const session = lookup.live;
       try {
-        if (session.timeoutHandle) {
-          clearTimeout(session.timeoutHandle);
-          session.timeoutHandle = undefined;
-        }
+        if (session) {
+          if (session.timeoutHandle) {
+            clearTimeout(session.timeoutHandle);
+            session.timeoutHandle = undefined;
+          }
 
-        await this.terminateProcess(session.process);
+          await this.terminateProcess(session.process);
 
-        if (session.proxyServer?.listening) {
-          await new Promise<void>((resolve) => session.proxyServer?.close(() => resolve()));
-        }
-        if (session.originServer?.listening) {
-          await new Promise<void>((resolve) => session.originServer?.close(() => resolve()));
-        }
+          if (session.proxyServer?.listening) {
+            await new Promise<void>((resolve) => session.proxyServer?.close(() => resolve()));
+          }
+          if (session.originServer?.listening) {
+            await new Promise<void>((resolve) => session.originServer?.close(() => resolve()));
+          }
 
-        if (session.workspaceDir && (await fileExists(session.workspaceDir))) {
-          await fs.rm(session.workspaceDir, { recursive: true, force: true });
-          cleaned.push(session.workspaceDir);
-        }
+          if (session.workspaceDir && (await fileExists(session.workspaceDir))) {
+            await fs.rm(session.workspaceDir, { recursive: true, force: true });
+            cleaned.push(session.workspaceDir);
+          }
 
-        session.status = opts?.expired ? "expired" : "stopped";
-        if (opts?.reason) {
-          session.lastError = opts.reason;
-          this.appendLog(session, "manager", `stop reason: ${opts.reason}`);
-        }
-        stopped.push(id);
+          session.status = opts?.expired ? "expired" : "stopped";
+          if (opts?.reason) {
+            session.lastError = opts.reason;
+            this.appendLog(session, "manager", `stop reason: ${opts.reason}`);
+          }
+          stopped.push(id);
 
-        await this.writeAudit({
-          ts: nowIso(),
-          event: opts?.expired ? "exposure_expired" : "exposure_stopped",
-          id: session.id,
-          type: session.type,
-          details: {
-            reason: opts?.reason,
-            public_url: session.publicUrl,
-          },
-        });
+          await this.writeAudit({
+            ts: nowIso(),
+            event: opts?.expired ? "exposure_expired" : "exposure_stopped",
+            id: session.id,
+            type: session.type,
+            details: {
+              reason: opts?.reason,
+              public_url: session.publicUrl,
+            },
+          });
+        } else if (lookup.persisted) {
+          await this.stopPersistedSession(lookup.persisted, opts, cleaned);
+          stopped.push(id);
+        } else {
+          failed.push({ id, error: "not_found" });
+        }
       } catch (error) {
         failed.push({ id, error: String(error) });
       } finally {
@@ -2611,11 +3064,13 @@ export class CfshareManager {
   private async runGc(): Promise<Record<string, unknown>> {
     const removedWorkspaces: string[] = [];
     const killedPids: number[] = [];
+    const persisted = await this.readPersistedSessions();
 
     const activeWorkspaces = new Set(
-      Array.from(this.sessions.values())
-        .map((session) => session.workspaceDir)
-        .filter((entry): entry is string => Boolean(entry)),
+      [
+        ...Array.from(this.sessions.values()).map((session) => session.workspaceDir),
+        ...Array.from(persisted.values()).map((session) => session.workspaceDir),
+      ].filter((entry): entry is string => Boolean(entry)),
     );
 
     const workspaces = await fs.readdir(this.workspaceRoot, { withFileTypes: true }).catch(() => []);
@@ -2631,23 +3086,22 @@ export class CfshareManager {
       removedWorkspaces.push(abs);
     }
 
-    try {
-      const raw = await fs.readFile(this.sessionsFile, "utf8");
-      const rows = JSON.parse(raw) as Array<{ id?: string; processPid?: number; workspaceDir?: string }>;
-      for (const row of rows ?? []) {
-        if (!row.processPid || this.sessions.has(String(row.id ?? ""))) {
-          continue;
-        }
+    for (const record of persisted.values()) {
+      if (this.sessions.has(record.id)) {
+        continue;
+      }
+      const pids = Array.from(
+        new Set([record.ownerPid, record.processPid].filter((pid): pid is number => Boolean(pid && pid > 0))),
+      );
+      for (const pid of pids) {
         try {
-          process.kill(row.processPid, 0);
-          process.kill(row.processPid, "SIGTERM");
-          killedPids.push(row.processPid);
+          process.kill(pid, 0);
+          process.kill(pid, "SIGTERM");
+          killedPids.push(pid);
         } catch {
-          // ignore
+          // ignore dead pid
         }
       }
-    } catch {
-      // ignore missing snapshot
     }
 
     await this.persistSessionsSnapshot();

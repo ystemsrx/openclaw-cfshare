@@ -180,7 +180,7 @@ cfshare env_check
 Common examples:
 
 ```bash
-# Expose an existing local service (keeps running until Ctrl+C by default)
+# Expose an existing local service
 cfshare expose_port '{"port":3000,"opts":{"access":"token"}}'
 
 # Share files/directories
@@ -190,8 +190,8 @@ cfshare expose_files '{"paths":["./dist"],"opts":{"access":"none"}}'
 cfshare exposure_stop '{"id":"all"}'
 ```
 
-`expose_port` and `expose_files` keep the process alive by default so the tunnel stays active.
-Use `--no-keep-alive` if you only want to print the result and exit.
+`expose_port` and `expose_files` print the result and exit by default.
+Use `--keep-alive` if you want foreground lifecycle control (`Ctrl+C` to stop).
 
 When running as CLI, CFShare uses `~/.cfshare` by default for state, workspaces, policy, and audit files.
 This is isolated from plugin mode (`~/.openclaw/cfshare`) so both can coexist safely.

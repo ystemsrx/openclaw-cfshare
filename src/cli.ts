@@ -79,8 +79,8 @@ function printHelp() {
     "  --config <json>        Runtime config JSON (same as plugin config)",
     "  --config-file <path>   Read runtime config from JSON file",
     "  --workspace-dir <dir>  Workspace dir for expose_files context",
-    "  --keep-alive           Keep process running after expose_*",
-    "  --no-keep-alive        Exit immediately after expose_* result",
+    "  --keep-alive           Keep process running after expose_* (foreground)",
+    "  --no-keep-alive        Exit after printing expose_* result (default)",
     "  --compact              Compact JSON output",
     "  -h, --help             Show help",
     "  -v, --version          Show version",
@@ -245,11 +245,11 @@ function createRuntimeApi(config: CfsharePluginConfig): CfshareRuntimeApi {
   };
 }
 
-function shouldKeepAlive(command: string, keepAliveFlag: boolean | undefined): boolean {
+function shouldKeepAlive(keepAliveFlag: boolean | undefined): boolean {
   if (typeof keepAliveFlag === "boolean") {
     return keepAliveFlag;
   }
-  return command === "expose_port" || command === "expose_files";
+  return false;
 }
 
 async function waitUntilExposureStops(manager: CfshareManager, id: string): Promise<void> {
@@ -472,13 +472,13 @@ async function main() {
   const result = await runTool(manager, command, params, options);
   process.stdout.write(`${JSON.stringify(result, null, options.compact ? undefined : 2)}\n`);
 
-  if (shouldKeepAlive(command, options.keepAlive)) {
+  if (shouldKeepAlive(options.keepAlive)) {
     const exposureId = typeof result === "object" && result ? (result as { id?: unknown }).id : undefined;
     if (typeof exposureId !== "string" || !exposureId) {
       return;
     }
     process.stderr.write(
-      `cfshare: exposure ${exposureId} is running. Press Ctrl+C to stop or use --no-keep-alive.\n`,
+      `cfshare: exposure ${exposureId} is running. Press Ctrl+C to stop.\n`,
     );
     await waitUntilExposureStops(manager, exposureId);
   }

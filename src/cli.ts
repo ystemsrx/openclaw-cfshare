@@ -33,6 +33,8 @@ const TOOL_NAMES = new Set([
   "audit_export",
 ]);
 
+const CLI_DEFAULT_STATE_DIR = "~/.cfshare";
+
 function normalizeCommand(input: string): string {
   return input.trim().toLowerCase().replace(/-/g, "_");
 }
@@ -231,10 +233,15 @@ function createRuntimeApi(config: CfsharePluginConfig): CfshareRuntimeApi {
     },
   } as unknown as CfshareRuntimeApi["logger"];
 
+  const runtimeConfig: CfsharePluginConfig = {
+    stateDir: CLI_DEFAULT_STATE_DIR,
+    ...config,
+  };
+
   return {
     logger,
     resolvePath: resolvePathFromCwd,
-    pluginConfig: config,
+    pluginConfig: runtimeConfig,
   };
 }
 

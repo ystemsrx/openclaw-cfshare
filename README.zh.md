@@ -193,6 +193,9 @@ cfshare exposure_stop '{"id":"all"}'
 `expose_port` 与 `expose_files` 默认会保持进程运行以维持隧道。
 如果你只想输出结果后立即退出，可加 `--no-keep-alive`。
 
+以 CLI 方式运行时，CFShare 默认使用 `~/.cfshare` 保存状态、workspace、策略和审计文件。
+它与插件模式（`~/.openclaw/cfshare`）完全隔离，可同时存在、互不干扰。
+
 ---
 
 ## ⚙️ 配置（可选）

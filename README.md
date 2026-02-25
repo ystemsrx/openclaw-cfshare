@@ -193,6 +193,9 @@ cfshare exposure_stop '{"id":"all"}'
 `expose_port` and `expose_files` keep the process alive by default so the tunnel stays active.
 Use `--no-keep-alive` if you only want to print the result and exit.
 
+When running as CLI, CFShare uses `~/.cfshare` by default for state, workspaces, policy, and audit files.
+This is isolated from plugin mode (`~/.openclaw/cfshare`) so both can coexist safely.
+
 ---
 
 ## ⚙️ Configuration (Optional)

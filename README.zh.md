@@ -18,6 +18,24 @@
 
 ---
 
+## ⚡ 快速开始
+
+```bash
+# 安装
+npm install -g @ystemsrx/cfshare
+
+# 作为 Agent Skill 使用（Claude Code、Codex 等）
+npx skills add ystemsrx/cfshare
+
+# 暴露本地服务
+cfshare expose_port '{"port":3000}'
+
+# 分享文件
+cfshare expose_files '{"paths":["./dist"]}'
+```
+
+---
+
 ## 📖 这是什么？
 
 **CFShare** 是一个 Node.js 命令行工具，让你能够：
@@ -123,6 +141,26 @@ cfshare env_check
 
 ---
 
+## 🤖 作为 Agent Skill 使用
+
+CFShare 提供了 Agent Skill，让 AI 编程助手（如 Claude Code、Codex 等）能够自动调用 CFShare 命令。安装 Skill：
+
+```bash
+npx skills add ystemsrx/cfshare
+```
+
+安装后，直接用自然语言和 AI 助手对话即可：
+
+> _"把 3000 端口用 token 认证暴露出去"_
+
+> _"把 `./dist` 目录通过公网链接分享出去"_
+
+> _"关掉所有正在分享的链接"_
+
+Agent 会自动调用相应的 `cfshare` 命令并返回结果。
+
+---
+
 ## 🖥️ 使用方法
 
 ```bash
@@ -153,18 +191,18 @@ cfshare exposure_stop '{"id":"all"}'
 
 ### 选项
 
-| 选项                   | 说明                               |
-| :--------------------- | :--------------------------------- |
-| `--params <json>`      | 以 JSON 传递命令参数               |
-| `--params-file <path>` | 从 JSON 文件读取命令参数           |
-| `--config <json>`      | 运行时配置 JSON                    |
-| `--config-file <path>` | 从 JSON 文件读取运行时配置         |
-| `--workspace-dir <dir>`| `expose_files` 的工作目录上下文    |
-| `--keep-alive`         | `expose_*` 后保持前台运行          |
-| `--no-keep-alive`      | 输出结果后退出（默认）             |
-| `--compact`            | 紧凑 JSON 输出                     |
-| `-h, --help`           | 显示帮助                           |
-| `-v, --version`        | 显示版本                           |
+| 选项                    | 说明                            |
+| :---------------------- | :------------------------------ |
+| `--params <json>`       | 以 JSON 传递命令参数            |
+| `--params-file <path>`  | 从 JSON 文件读取命令参数        |
+| `--config <json>`       | 运行时配置 JSON                 |
+| `--config-file <path>`  | 从 JSON 文件读取运行时配置      |
+| `--workspace-dir <dir>` | `expose_files` 的工作目录上下文 |
+| `--keep-alive`          | `expose_*` 后保持前台运行       |
+| `--no-keep-alive`       | 输出结果后退出（默认）          |
+| `--compact`             | 紧凑 JSON 输出                  |
+| `-h, --help`            | 显示帮助                        |
+| `-v, --version`         | 显示版本                        |
 
 ---
 
@@ -192,18 +230,18 @@ cfshare expose_port '{"port":3000}' --config-file ~/.cfshare/config.json
 
 ### 可配置项速查
 
-| 配置项                     | 默认值              | 说明                           |
-| :------------------------- | :------------------ | :----------------------------- |
-| `cloudflaredPath`          | `"cloudflared"`     | `cloudflared` 的路径或名称     |
-| `stateDir`                 | `~/.cfshare`        | 状态文件存储目录               |
-| `defaultTtlSeconds`        | `3600`（1 小时）    | 默认隧道存活时间               |
-| `maxTtlSeconds`            | `86400`（24 小时）  | 最大 TTL 上限                  |
-| `defaultExposePortAccess`  | `"token"`           | 端口暴露默认认证模式           |
-| `defaultExposeFilesAccess` | `"none"`            | 文件分享默认认证模式           |
-| `blockedPorts`             | `[22, 2375, 2376]`  | 禁止暴露的端口（SSH / Docker） |
-| `rateLimit.enabled`        | `true`              | 是否启用速率限制               |
-| `rateLimit.maxRequests`    | `240`               | 每窗口期最大请求数             |
-| `rateLimit.windowMs`       | `60000`（1 分钟）   | 速率限制窗口（毫秒）           |
+| 配置项                     | 默认值             | 说明                           |
+| :------------------------- | :----------------- | :----------------------------- |
+| `cloudflaredPath`          | `"cloudflared"`    | `cloudflared` 的路径或名称     |
+| `stateDir`                 | `~/.cfshare`       | 状态文件存储目录               |
+| `defaultTtlSeconds`        | `3600`（1 小时）   | 默认隧道存活时间               |
+| `maxTtlSeconds`            | `86400`（24 小时） | 最大 TTL 上限                  |
+| `defaultExposePortAccess`  | `"token"`          | 端口暴露默认认证模式           |
+| `defaultExposeFilesAccess` | `"none"`           | 文件分享默认认证模式           |
+| `blockedPorts`             | `[22, 2375, 2376]` | 禁止暴露的端口（SSH / Docker） |
+| `rateLimit.enabled`        | `true`             | 是否启用速率限制               |
+| `rateLimit.maxRequests`    | `240`              | 每窗口期最大请求数             |
+| `rateLimit.windowMs`       | `60000`（1 分钟）  | 速率限制窗口（毫秒）           |
 
 > [!TIP]
 > **认证模式说明：**

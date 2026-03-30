@@ -18,6 +18,24 @@ Securely share local files and services to the public internet via Cloudflare Tu
 
 ---
 
+## ⚡ Quick Start
+
+```bash
+# Install
+npm install -g @ystemsrx/cfshare
+
+# Or use as an Agent Skill (Claude Code, Codex, etc.)
+npx skills add ystemsrx/cfshare
+
+# Expose a local service
+cfshare expose_port '{"port":3000}'
+
+# Share files
+cfshare expose_files '{"paths":["./dist"]}'
+```
+
+---
+
 ## 📖 What Is This?
 
 **CFShare** is a Node.js CLI tool that enables you to:
@@ -123,6 +141,26 @@ cfshare env_check
 
 ---
 
+## 🤖 Use as an Agent Skill
+
+CFShare provides an Agent Skill that lets AI coding assistants (such as Claude Code, Codex, etc.) automatically call CFShare commands. Install the skill with:
+
+```bash
+npx skills add ystemsrx/cfshare
+```
+
+Once installed, just talk to your AI coding assistant in natural language:
+
+> _"Expose port 3000 with token auth"_
+
+> _"Share the `./dist` directory via a public link"_
+
+> _"Stop all active shares"_
+
+The agent will automatically invoke the appropriate `cfshare` commands and return the results.
+
+---
+
 ## 🖥️ Usage
 
 ```bash
@@ -153,18 +191,18 @@ Use `--keep-alive` if you want foreground lifecycle control (`Ctrl+C` to stop).
 
 ### Options
 
-| Option                 | Description                               |
-| :--------------------- | :---------------------------------------- |
-| `--params <json>`      | Tool parameters as JSON                   |
-| `--params-file <path>` | Read tool parameters from a JSON file     |
-| `--config <json>`      | Runtime config JSON                       |
-| `--config-file <path>` | Read runtime config from a JSON file      |
-| `--workspace-dir <dir>`| Workspace dir for `expose_files` context  |
-| `--keep-alive`         | Keep process running after `expose_*`     |
-| `--no-keep-alive`      | Exit after printing result (default)      |
-| `--compact`            | Compact JSON output                       |
-| `-h, --help`           | Show help                                 |
-| `-v, --version`        | Show version                              |
+| Option                  | Description                              |
+| :---------------------- | :--------------------------------------- |
+| `--params <json>`       | Tool parameters as JSON                  |
+| `--params-file <path>`  | Read tool parameters from a JSON file    |
+| `--config <json>`       | Runtime config JSON                      |
+| `--config-file <path>`  | Read runtime config from a JSON file     |
+| `--workspace-dir <dir>` | Workspace dir for `expose_files` context |
+| `--keep-alive`          | Keep process running after `expose_*`    |
+| `--no-keep-alive`       | Exit after printing result (default)     |
+| `--compact`             | Compact JSON output                      |
+| `-h, --help`            | Show help                                |
+| `-v, --version`         | Show version                             |
 
 ---
 
@@ -192,18 +230,18 @@ cfshare expose_port '{"port":3000}' --config-file ~/.cfshare/config.json
 
 ### Configuration Reference
 
-| Option                     | Default             | Description                              |
-| :------------------------- | :------------------ | :--------------------------------------- |
-| `cloudflaredPath`          | `"cloudflared"`     | Path or command name for `cloudflared`   |
-| `stateDir`                 | `~/.cfshare`        | Directory for state file storage         |
-| `defaultTtlSeconds`        | `3600` (1 hour)     | Default tunnel time-to-live              |
-| `maxTtlSeconds`            | `86400` (24 hours)  | Maximum TTL cap                          |
-| `defaultExposePortAccess`  | `"token"`           | Default auth mode for port exposure      |
-| `defaultExposeFilesAccess` | `"none"`            | Default auth mode for file sharing       |
-| `blockedPorts`             | `[22, 2375, 2376]`  | Ports blocked from exposure (SSH/Docker) |
-| `rateLimit.enabled`        | `true`              | Whether rate limiting is enabled         |
-| `rateLimit.maxRequests`    | `240`               | Max requests per window                  |
-| `rateLimit.windowMs`       | `60000` (1 minute)  | Rate limit window in milliseconds        |
+| Option                     | Default            | Description                              |
+| :------------------------- | :----------------- | :--------------------------------------- |
+| `cloudflaredPath`          | `"cloudflared"`    | Path or command name for `cloudflared`   |
+| `stateDir`                 | `~/.cfshare`       | Directory for state file storage         |
+| `defaultTtlSeconds`        | `3600` (1 hour)    | Default tunnel time-to-live              |
+| `maxTtlSeconds`            | `86400` (24 hours) | Maximum TTL cap                          |
+| `defaultExposePortAccess`  | `"token"`          | Default auth mode for port exposure      |
+| `defaultExposeFilesAccess` | `"none"`           | Default auth mode for file sharing       |
+| `blockedPorts`             | `[22, 2375, 2376]` | Ports blocked from exposure (SSH/Docker) |
+| `rateLimit.enabled`        | `true`             | Whether rate limiting is enabled         |
+| `rateLimit.maxRequests`    | `240`              | Max requests per window                  |
+| `rateLimit.windowMs`       | `60000` (1 minute) | Rate limit window in milliseconds        |
 
 > [!TIP]
 > **Auth mode reference:**
@@ -216,18 +254,18 @@ cfshare expose_port '{"port":3000}' --config-file ~/.cfshare/config.json
 
 ## 🧰 Command Reference
 
-| Command         | Purpose                                           |
-| :-------------- | :------------------------------------------------ |
+| Command         | Purpose                                            |
+| :-------------- | :------------------------------------------------- |
 | `env_check`     | Check if `cloudflared` is available & view policy  |
-| `expose_port`   | Expose a local port to the public internet        |
-| `expose_files`  | Share files/directories (auto static server)      |
-| `exposure_list` | List all active sessions                          |
-| `exposure_get`  | Get details for a specific session                |
-| `exposure_stop` | Stop and clean up specific or all sessions        |
-| `exposure_logs` | View session logs                                 |
+| `expose_port`   | Expose a local port to the public internet         |
+| `expose_files`  | Share files/directories (auto static server)       |
+| `exposure_list` | List all active sessions                           |
+| `exposure_get`  | Get details for a specific session                 |
+| `exposure_stop` | Stop and clean up specific or all sessions         |
+| `exposure_logs` | View session logs                                  |
 | `maintenance`   | TTL guardian / garbage collection / policy refresh |
-| `audit_query`   | Query audit logs                                  |
-| `audit_export`  | Export audit logs to a file                       |
+| `audit_query`   | Query audit logs                                   |
+| `audit_export`  | Export audit logs to a file                        |
 
 ---
 

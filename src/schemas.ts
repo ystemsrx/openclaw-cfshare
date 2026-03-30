@@ -1,5 +1,11 @@
-import { Type } from "@sinclair/typebox";
-import { stringEnum } from "openclaw/plugin-sdk";
+import { Type, type TSchema } from "@sinclair/typebox";
+
+function stringEnum<const T extends readonly string[]>(
+  values: T,
+  options?: Record<string, unknown>,
+): TSchema {
+  return Type.Unsafe<T[number]>({ type: "string", enum: [...values], ...options });
+}
 
 const AccessMode = stringEnum(["token", "basic", "none"] as const, {
   description: "Access mode",

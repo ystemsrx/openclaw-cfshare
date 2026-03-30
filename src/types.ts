@@ -27,7 +27,7 @@ export type CfsharePolicy = {
   rateLimit: RateLimitPolicy;
 };
 
-export type CfsharePluginConfig = Partial<CfsharePolicy> & {
+export type CfshareConfig = Partial<CfsharePolicy> & {
   stateDir?: string;
   cloudflaredPath?: string;
   policyFile?: string;

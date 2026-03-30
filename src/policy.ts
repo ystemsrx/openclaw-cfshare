@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import ignore from "ignore";
-import type { CfsharePluginConfig, CfsharePolicy } from "./types.js";
+import type { CfshareConfig, CfsharePolicy } from "./types.js";
 
 export const DEFAULT_POLICY: CfsharePolicy = {
   defaultTtlSeconds: 3600,
@@ -60,7 +60,7 @@ function asStringArray(input: unknown): string[] | undefined {
 
 export function mergePolicy(
   defaults: CfsharePolicy,
-  pluginConfig: CfsharePluginConfig,
+  config: CfshareConfig,
   fileConfig: Record<string, unknown>,
 ): CfsharePolicy {
   const fileTunnel = (fileConfig.tunnel as Record<string, unknown> | undefined) ?? {};
@@ -70,35 +70,35 @@ export function mergePolicy(
     defaultTtlSeconds:
       typeof fileConfig.defaultTtlSeconds === "number"
         ? fileConfig.defaultTtlSeconds
-        : pluginConfig.defaultTtlSeconds ?? defaults.defaultTtlSeconds,
+        : config.defaultTtlSeconds ?? defaults.defaultTtlSeconds,
     maxTtlSeconds:
       typeof fileConfig.maxTtlSeconds === "number"
         ? fileConfig.maxTtlSeconds
-        : pluginConfig.maxTtlSeconds ?? defaults.maxTtlSeconds,
+        : config.maxTtlSeconds ?? defaults.maxTtlSeconds,
     defaultExposePortAccess: normalizeAccess(
       fileConfig.defaultExposePortAccess,
-      normalizeAccess(pluginConfig.defaultExposePortAccess, defaults.defaultExposePortAccess),
+      normalizeAccess(config.defaultExposePortAccess, defaults.defaultExposePortAccess),
     ),
     defaultExposeFilesAccess: normalizeAccess(
       fileConfig.defaultExposeFilesAccess,
-      normalizeAccess(pluginConfig.defaultExposeFilesAccess, defaults.defaultExposeFilesAccess),
+      normalizeAccess(config.defaultExposeFilesAccess, defaults.defaultExposeFilesAccess),
     ),
     blockedPorts:
       asPortArray(fileConfig.blockedPorts) ??
-      asPortArray(pluginConfig.blockedPorts) ??
+      asPortArray(config.blockedPorts) ??
       defaults.blockedPorts,
     allowedPathRoots:
       asStringArray(fileConfig.allowedPathRoots) ??
-      asStringArray(pluginConfig.allowedPathRoots) ??
+      asStringArray(config.allowedPathRoots) ??
       defaults.allowedPathRoots,
     tunnel: {
       ...defaults.tunnel,
-      ...(pluginConfig.tunnel ?? {}),
+      ...(config.tunnel ?? {}),
       ...(fileTunnel as Partial<CfsharePolicy["tunnel"]>),
     },
     rateLimit: {
       ...defaults.rateLimit,
-      ...(pluginConfig.rateLimit ?? {}),
+      ...(config.rateLimit ?? {}),
       ...(fileRateLimit as Partial<CfsharePolicy["rateLimit"]>),
     },
   };
@@ -128,7 +128,7 @@ export function mergePolicy(
 export async function loadPolicy(params: {
   policyFile: string;
   ignoreFile: string;
-  pluginConfig: CfsharePluginConfig;
+  config: CfshareConfig;
 }): Promise<LoadedPolicy> {
   const warnings: string[] = [];
   let fileConfig: Record<string, unknown> = {};
@@ -148,10 +148,10 @@ export async function loadPolicy(params: {
     }
   }
 
-  const effective = mergePolicy(DEFAULT_POLICY, params.pluginConfig, fileConfig);
+  const effective = mergePolicy(DEFAULT_POLICY, params.config, fileConfig);
 
   const matcher = ignore();
-  matcher.add([".git/**", ".openclaw/**"]);
+  matcher.add([".git/**", ".cfshare/**"]);
 
   try {
     const ignoreText = await fs.readFile(params.ignoreFile, "utf8");

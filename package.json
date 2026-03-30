@@ -1,8 +1,8 @@
 {
   "name": "@ystemsrx/cfshare",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "type": "module",
-  "description": "OpenClaw plugin to safely expose local ports/files via Cloudflare Quick Tunnel",
+  "description": "Safely expose local ports/files via Cloudflare Quick Tunnel",
   "license": "MIT",
   "bin": {
     "cfshare": "dist/src/cli.js"
@@ -14,28 +14,14 @@
   },
   "files": [
     "dist",
-    "index.ts",
-    "src",
-    "skills",
-    "openclaw.plugin.json"
+    "src"
   ],
   "keywords": [
-    "openclaw",
     "cloudflared",
     "cloudflare",
     "tunnel",
     "file-share"
   ],
-  "openclaw": {
-    "extensions": [
-      "./index.ts"
-    ],
-    "install": {
-      "npmSpec": "@ystemsrx/cfshare",
-      "localPath": ".",
-      "defaultChoice": "npm"
-    }
-  },
   "dependencies": {
     "@sinclair/typebox": "0.34.48",
     "ignore": "^7.0.5",
@@ -45,10 +31,6 @@
   "devDependencies": {
     "@types/mime-types": "^3.0.1",
     "@types/node": "^25.0.10",
-    "openclaw": "2026.1.29",
     "typescript": "^5.7.0"
-  },
-  "peerDependencies": {
-    "openclaw": ">=2026.1.29"
   }
 }

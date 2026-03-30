@@ -10,7 +10,6 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import ignore from "ignore";
 import { lookup as mimeLookup } from "mime-types";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import yazl from "yazl";
 import { renderFileExplorerTemplate } from "./templates/fileExplorerTemplate.js";
 import { renderMarkdownPreviewTemplate } from "./templates/markdownPreviewTemplate.js";
@@ -19,7 +18,7 @@ import type {
   AccessMode,
   AccessState,
   AuditEvent,
-  CfsharePluginConfig,
+  CfshareConfig,
   CfsharePolicy,
   ExposureRecord,
   ExposureSession,
@@ -31,7 +30,16 @@ import type {
   RateLimitPolicy,
 } from "./types.js";
 
-export type CfshareRuntimeApi = Pick<OpenClawPluginApi, "logger" | "resolvePath" | "pluginConfig">;
+export type CfshareRuntimeApi = {
+  logger: {
+    info: (...args: unknown[]) => void;
+    warn: (...args: unknown[]) => void;
+    error: (...args: unknown[]) => void;
+    debug: (...args: unknown[]) => void;
+  };
+  resolvePath: (input: string) => string;
+  config?: Record<string, unknown>;
+};
 
 const MAX_LOG_LINES = 4000;
 const MAX_RESPONSE_MANIFEST_ITEMS = 200;
@@ -756,7 +764,7 @@ function matchAuditFilters(
 export class CfshareManager {
   private readonly logger: CfshareRuntimeApi["logger"];
   private readonly resolvePath: (input: string) => string;
-  private readonly pluginConfig: CfsharePluginConfig;
+  private readonly cfshareConfig: CfshareConfig;
   private readonly cloudflaredPathInput: string;
   private readonly stateDir: string;
   private readonly policyFile: string;
@@ -779,21 +787,21 @@ export class CfshareManager {
   constructor(api: CfshareRuntimeApi) {
     this.logger = api.logger;
     this.resolvePath = api.resolvePath;
-    this.pluginConfig = (api.pluginConfig ?? {}) as CfsharePluginConfig;
+    this.cfshareConfig = (api.config ?? {}) as CfshareConfig;
 
-    this.stateDir = this.resolvePath(this.pluginConfig.stateDir ?? "~/.openclaw/cfshare");
+    this.stateDir = this.resolvePath(this.cfshareConfig.stateDir ?? "~/.cfshare");
     this.policyFile = this.resolvePath(
-      this.pluginConfig.policyFile ?? path.join(this.stateDir, "policy.json"),
+      this.cfshareConfig.policyFile ?? path.join(this.stateDir, "policy.json"),
     );
     this.ignoreFile = this.resolvePath(
-      this.pluginConfig.ignoreFile ?? path.join(this.stateDir, "policy.ignore"),
+      this.cfshareConfig.ignoreFile ?? path.join(this.stateDir, "policy.ignore"),
     );
     this.workspaceRoot = path.join(this.stateDir, "workspaces");
     this.auditFile = path.join(this.stateDir, "audit.jsonl");
     this.sessionsFile = path.join(this.stateDir, "sessions.json");
     this.sessionsDir = path.join(this.stateDir, "sessions");
     this.exportsDir = path.join(this.stateDir, "exports");
-    this.cloudflaredPathInput = this.pluginConfig.cloudflaredPath ?? "cloudflared";
+    this.cloudflaredPathInput = this.cfshareConfig.cloudflaredPath ?? "cloudflared";
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -820,7 +828,7 @@ export class CfshareManager {
     const loaded = await loadPolicy({
       policyFile: this.policyFile,
       ignoreFile: this.ignoreFile,
-      pluginConfig: this.pluginConfig,
+      config: this.cfshareConfig,
     });
     this.policy = loaded.effective;
     this.policyWarnings = loaded.warnings;

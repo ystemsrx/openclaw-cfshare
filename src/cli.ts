@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { CfshareManager, type CfshareRuntimeApi } from "./manager.js";
-import type { CfsharePluginConfig } from "./types.js";
+import type { CfshareConfig } from "./types.js";
 
 type CliOptions = {
   command?: string;
@@ -82,7 +82,7 @@ function printHelp() {
     "Options:",
     "  --params <json>        Tool parameters as JSON",
     "  --params-file <path>   Read tool parameters from JSON file",
-    "  --config <json>        Runtime config JSON (same as plugin config)",
+    "  --config <json>        Runtime config JSON",
     "  --config-file <path>   Read runtime config from JSON file",
     "  --workspace-dir <dir>  Workspace dir for expose_files context",
     "  --keep-alive           Keep process running after expose_* (foreground)",
@@ -214,7 +214,7 @@ function asObject(input: unknown, label: string): Record<string, unknown> {
   return input as Record<string, unknown>;
 }
 
-function createRuntimeApi(config: CfsharePluginConfig): CfshareRuntimeApi {
+function createRuntimeApi(config: CfshareConfig): CfshareRuntimeApi {
   const stringifyArgs = (args: unknown[]) =>
     args
       .map((value) => {
@@ -248,7 +248,7 @@ function createRuntimeApi(config: CfsharePluginConfig): CfshareRuntimeApi {
     },
   } as unknown as CfshareRuntimeApi["logger"];
 
-  const runtimeConfig: CfsharePluginConfig = {
+  const runtimeConfig: CfshareConfig = {
     stateDir: CLI_DEFAULT_STATE_DIR,
     ...config,
   };
@@ -256,7 +256,7 @@ function createRuntimeApi(config: CfsharePluginConfig): CfshareRuntimeApi {
   return {
     logger,
     resolvePath: resolvePathFromCwd,
-    pluginConfig: runtimeConfig,
+    config: runtimeConfig,
   };
 }
 
@@ -595,7 +595,7 @@ async function main() {
         : {};
 
   const params = asObject(paramsInput, "params");
-  const config = asObject(configInput, "config") as CfsharePluginConfig;
+  const config = asObject(configInput, "config") as CfshareConfig;
 
   if (isExposeCommand(command) && !shouldKeepAlive(options.keepAlive) && !options.detachedWorker) {
     const detachedResult = await runDetachedExposureWorker();

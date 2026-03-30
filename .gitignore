@@ -4,5 +4,4 @@ dist/
 *.log
 .DS_Store
 AGENTS.md
-openclaw/
 package-lock.json
